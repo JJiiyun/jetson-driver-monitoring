@@ -1,0 +1,6 @@
+Python: Python 3.8.10
+OpenCV: 5.0.0
+TensorRT: 8.0.1.6
+NumPy: 1.24.4
+Cuda compilation tools, release 10.2, V10.2.300
+# R32 (release), REVISION: 6.1, GCID: 27863751, BOARD: t210ref, EABI: aarch64, DATE: Mon Jul 26 19:20:30 UTC 2021

@@ -1,0 +1,12 @@
+# ZZM project-specific Python packages
+#
+# System-provided Jetson packages:
+# - OpenCV 5.0.0
+# - TensorRT 8.0.1.6
+# - CUDA 10.2
+# - cuDNN 8.2.1
+#
+# Create the virtual environment with:
+# python3 -m venv --system-site-packages ~/zzmenv
+
+numpy==1.24.4

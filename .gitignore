@@ -1,0 +1,57 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+zzmenv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Outputs
+outputs/*
+!outputs/.gitkeep
+
+# Dataset files
+data/*
+!data/.gitkeep
+
+# Model files
+models/*
+!models/.gitkeep
+*.engine
+*.plan
+*.onnx
+*.pth
+*.pt
+*.weights
+
+# Benchmark results
+benchmark/results/*
+!benchmark/results/.gitkeep
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
