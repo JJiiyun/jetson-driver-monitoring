@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_DIR="${PROJECT_DIR}/.venv"
+VENV_DIR="${PROJECT_DIR}/zzmvenv"
 REQUIREMENTS_FILE="${PROJECT_DIR}/requirements.txt"
 
 echo "========================================"

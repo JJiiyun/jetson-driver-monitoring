@@ -6,7 +6,11 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
-zzmenv/
+zzmvenv/
+__pycache__/
+*.pyc
+logs/
+outputs/
 env/
 
 # Environment variables
