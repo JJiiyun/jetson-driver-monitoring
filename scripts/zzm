@@ -1,0 +1,2 @@
+source ~/jetson-driver-monitoring/zzmvenv/bin/activate
+cd ~/jetson-driver-monitoring
