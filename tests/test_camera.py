@@ -1,13 +1,23 @@
 import sys
 import time
+from pathlib import Path
 
 import cv2
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from benchmark import PerformanceLogger
+
+
+RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 CAMERA_INDEX = 0
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 TARGET_FPS = 30
+WARMUP_FRAMES = 30
 
 
 def main() -> int:
@@ -31,34 +41,32 @@ def main() -> int:
     print(f"Reported FPS: {actual_fps:.1f}")
     print("Press q to quit.")
 
-    previous_time = time.perf_counter()
-    smoothed_fps = 0.0
+    logger = PerformanceLogger(
+        backend="opencv_camera_only",
+        output_dir=RESULTS_DIR,
+        warmup_frames=WARMUP_FRAMES,
+        input_source=f"camera:{CAMERA_INDEX}",
+        width=actual_width,
+        height=actual_height,
+        target_fps=TARGET_FPS,
+    )
 
     while True:
+        frame_started_at = time.perf_counter()
+
+        capture_started_at = time.perf_counter()
         success, frame = cap.read()
+        capture_ms = (
+            time.perf_counter() - capture_started_at
+        ) * 1000.0
 
         if not success:
             print("[ERROR] Failed to read frame.")
             break
 
-        current_time = time.perf_counter()
-        elapsed = current_time - previous_time
-        previous_time = current_time
-
-        if elapsed > 0:
-            current_fps = 1.0 / elapsed
-
-            if smoothed_fps == 0:
-                smoothed_fps = current_fps
-            else:
-                smoothed_fps = (
-                    0.9 * smoothed_fps
-                    + 0.1 * current_fps
-                )
-
         cv2.putText(
             frame,
-            f"FPS: {smoothed_fps:.1f}",
+            f"FPS: {logger.current_fps:.1f}",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.0,
@@ -70,11 +78,22 @@ def main() -> int:
 
         key = cv2.waitKey(1) & 0xFF
 
+        logger.record_frame(
+            frame_started_at=frame_started_at,
+            frame_finished_at=time.perf_counter(),
+            capture_ms=capture_ms,
+        )
+
         if key == ord("q"):
             break
 
     cap.release()
     cv2.destroyAllWindows()
+
+    summary = logger.write_csv()
+    logger.print_summary(summary)
+    print(f"Frame CSV: {logger.frame_csv_path}")
+    print(f"Summary CSV: {logger.summary_csv_path}")
 
     return 0
 
