@@ -94,6 +94,13 @@ class EyeClosureMonitorTest(unittest.TestCase):
         self.assertEqual(reopened.status, "NORMAL")
         self.assertEqual(reopened.closed_seconds, 0.0)
 
+        missing_face = monitor.update(None, timestamp=6.3)
+        self.assertEqual(missing_face.status, "NO FACE")
+        self.assertTrue(missing_face.calibrated)
+        self.assertAlmostEqual(missing_face.baseline_ear, 0.30)
+        self.assertIsNone(missing_face.relative_ear)
+        self.assertEqual(missing_face.closed_seconds, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

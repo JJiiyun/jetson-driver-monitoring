@@ -85,6 +85,12 @@ def state_color(status: str) -> tuple[int, int, int]:
     return 0, 255, 0
 
 
+def format_optional(value: float | None, precision: int = 3) -> str:
+    if value is None or not np.isfinite(value):
+        return "--"
+    return f"{value:.{precision}f}"
+
+
 def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
     cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
     if not cap.isOpened():
@@ -213,8 +219,10 @@ def main() -> int:
             else:
                 draw_text(
                     frame,
-                    f"BASE: {eye_state.baseline_ear:.3f}  "
-                    f"REL: {eye_state.relative_ear:.2f}",
+                    "BASE: "
+                    f"{format_optional(eye_state.baseline_ear)}  "
+                    "REL: "
+                    f"{format_optional(eye_state.relative_ear, 2)}",
                     2,
                 )
                 draw_text(
