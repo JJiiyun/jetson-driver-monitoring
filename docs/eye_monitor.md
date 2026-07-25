@@ -35,6 +35,24 @@ python3 scripts/run_eye_monitor.py
 - `q`: quit
 - `r`: restart the three-second EAR calibration
 
+The annotated video is saved from the first captured frame through the frame
+where `q` is pressed:
+
+```text
+outputs/videos/<run_id>.avi
+```
+
+The same `run_id` links the video to its performance and EAR data:
+
+```text
+benchmark/results/<run_id>_frames.csv
+benchmark/results/<run_id>_summary.csv
+```
+
+The frame CSV contains the performance columns plus `ear`, `right_ear`,
+`left_ear`, `baseline_ear`, `relative_ear`, `closed_threshold`,
+`is_eye_closed`, `closed_seconds`, and `eye_state`.
+
 Optional thresholds:
 
 ```bash

@@ -23,10 +23,24 @@ from drowsiness import (
     mouth_display_points,
 )
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from benchmark import PerformanceLogger
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
+VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
+EYE_FRAME_FIELDS = [
+    "ear",
+    "right_ear",
+    "left_ear",
+    "baseline_ear",
+    "relative_ear",
+    "closed_threshold",
+    "is_eye_closed",
+    "closed_seconds",
+    "eye_state",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
     parser.add_argument("--closed-ratio", type=float, default=0.70)
     parser.add_argument("--danger-seconds", type=float, default=2.0)
+    parser.add_argument("--warmup-frames", type=int, default=30)
+    parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
+    parser.add_argument("--video-codec", default="MJPG")
     return parser.parse_args()
 
 
@@ -109,6 +126,9 @@ def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
 
 def main() -> int:
     args = parse_args()
+    if len(args.video_codec) != 4:
+        print("[ERROR] --video-codec must contain exactly four characters.")
+        return 1
 
     try:
         face_detector = YuNetFaceDetector(
@@ -130,28 +150,53 @@ def main() -> int:
         print(f"[ERROR] Cannot open camera index {args.camera}.")
         return 1
 
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or args.width
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or args.height
+    reported_fps = cap.get(cv2.CAP_PROP_FPS)
+    video_fps = reported_fps if reported_fps > 1.0 else float(args.fps)
+
+    logger = PerformanceLogger(
+        backend="opencv_yunet_pfld_fp32",
+        output_dir=RESULTS_DIR,
+        warmup_frames=args.warmup_frames,
+        input_source=f"camera:{args.camera}",
+        width=actual_width,
+        height=actual_height,
+        target_fps=args.fps,
+        extra_frame_fields=EYE_FRAME_FIELDS,
+    )
+
+    args.video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = args.video_dir / f"{logger.run_id}.avi"
+    video_writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*args.video_codec),
+        video_fps,
+        (actual_width, actual_height),
+    )
+    if not video_writer.isOpened():
+        cap.release()
+        print(f"[ERROR] Cannot create video file: {video_path}")
+        return 1
+
     print("Keep both eyes naturally open during the first 3 seconds.")
     print("Press r to recalibrate. Press q to quit.")
-    previous_frame_at = time.monotonic()
-    smoothed_fps = 0.0
+    print(f"Video: {video_path}")
 
     try:
         while True:
+            frame_started_at = time.perf_counter()
+            capture_started_at = time.perf_counter()
             success, frame = cap.read()
+            capture_ms = (
+                time.perf_counter() - capture_started_at
+            ) * 1000.0
             if not success:
                 print("[ERROR] Failed to read camera frame.")
                 break
 
             now = time.monotonic()
-            frame_seconds = max(now - previous_frame_at, 1e-6)
-            previous_frame_at = now
-            current_fps = 1.0 / frame_seconds
-            smoothed_fps = (
-                current_fps
-                if smoothed_fps == 0.0
-                else 0.9 * smoothed_fps + 0.1 * current_fps
-            )
-
+            inference_started_at = time.perf_counter()
             detection = face_detector.detect_largest(frame)
             mean_ear = None
             right_ear = None
@@ -195,6 +240,9 @@ def main() -> int:
                     2,
                 )
 
+            inference_ms = (
+                time.perf_counter() - inference_started_at
+            ) * 1000.0
             eye_state = monitor.update(mean_ear, timestamp=now)
             color = state_color(eye_state.status)
 
@@ -233,20 +281,49 @@ def main() -> int:
                 )
 
             draw_text(frame, f"STATE: {eye_state.status}", 4, color)
-            draw_text(frame, f"FPS: {smoothed_fps:.1f}", 5)
+            draw_text(frame, f"FPS: {logger.current_fps:.1f}", 5)
             draw_text(frame, "q: quit  r: recalibrate", 6)
 
+            video_writer.write(frame)
             cv2.imshow("ZZM EAR Eye Monitor", frame)
             key = cv2.waitKey(1) & 0xFF
+
+            logger.record_frame(
+                frame_started_at=frame_started_at,
+                frame_finished_at=time.perf_counter(),
+                capture_ms=capture_ms,
+                inference_ms=inference_ms,
+                face_count=0 if detection is None else 1,
+                extra_metrics={
+                    "ear": eye_state.ear,
+                    "right_ear": right_ear,
+                    "left_ear": left_ear,
+                    "baseline_ear": eye_state.baseline_ear,
+                    "relative_ear": eye_state.relative_ear,
+                    "closed_threshold": eye_state.closed_threshold,
+                    "is_eye_closed": eye_state.is_closed,
+                    "closed_seconds": eye_state.closed_seconds,
+                    "eye_state": eye_state.status,
+                },
+            )
+
             if key == ord("q"):
                 break
             if key == ord("r"):
                 monitor.reset()
                 print("EAR calibration reset.")
+    except KeyboardInterrupt:
+        print("\nStopped by keyboard interrupt.")
     finally:
+        video_writer.release()
         cap.release()
         cv2.destroyAllWindows()
 
+    summary = logger.write_csv()
+    logger.print_summary(summary)
+    print(f"Video: {video_path}")
+    print(f"Frame CSV: {logger.frame_csv_path}")
+    print(f"Summary CSV: {logger.summary_csv_path}")
     return 0
 
 
