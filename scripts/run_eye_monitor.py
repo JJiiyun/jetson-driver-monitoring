@@ -22,6 +22,7 @@ from drowsiness import (
     mean_eye_aspect_ratio,
 )
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
 from benchmark import PerformanceLogger
 
@@ -40,6 +41,7 @@ EYE_FRAME_FIELDS = [
     "baseline_ear",
     "relative_ear",
     "closed_threshold",
+    "reopen_threshold",
     "is_eye_closed",
     "closed_seconds",
     "eye_state",
@@ -107,6 +109,9 @@ def parse_args() -> argparse.Namespace:
         "--closed-ratio", type=open_unit_interval, default=0.70
     )
     parser.add_argument(
+        "--reopen-ratio", type=closed_unit_interval, default=0.80
+    )
+    parser.add_argument(
         "--danger-seconds", type=positive_float, default=2.0
     )
     # [PERCLOS] 추가 옵션
@@ -128,6 +133,10 @@ def parse_args() -> argparse.Namespace:
             "--perclos-caution must be less than or equal to "
             "--perclos-warning"
         )
+    if args.closed_ratio >= args.reopen_ratio:
+        parser.error(
+            "--reopen-ratio must be greater than --closed-ratio"
+        )
     return args
 
 
@@ -139,42 +148,6 @@ def draw_points(
 ) -> None:
     for point_x, point_y in np.rint(points).astype(int):
         cv2.circle(frame, (point_x, point_y), radius, color, -1)
-
-
-def draw_text(
-    frame: np.ndarray,
-    text: str,
-    row: int,
-    color: tuple[int, int, int] = (255, 255, 255),
-) -> None:
-    cv2.putText(
-        frame,
-        text,
-        (20, 30 + row * 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        color,
-        2,
-        cv2.LINE_AA,
-    )
-
-
-def state_color(status: str) -> tuple[int, int, int]:
-    if status == "DANGER":
-        return 0, 0, 255
-    if status == "EYES CLOSED":
-        return 0, 165, 255
-    if status == "CALIBRATING":
-        return 0, 255, 255
-    if status == "NO FACE":
-        return 160, 160, 160
-    return 0, 255, 0
-
-
-def format_optional(value: float | None, precision: int = 3) -> str:
-    if value is None or not np.isfinite(value):
-        return "--"
-    return f"{value:.{precision}f}"
 
 
 def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
@@ -212,6 +185,7 @@ def main() -> int:
     monitor = EyeClosureMonitor(
         calibration_seconds=args.calibration_seconds,
         closed_ratio=args.closed_ratio,
+        reopen_ratio=args.reopen_ratio,
         danger_seconds=args.danger_seconds,
     )
     # [PERCLOS] 모니터 생성
@@ -331,68 +305,15 @@ def main() -> int:
                 valid_face=eye_state.valid_face,
                 timestamp=now,
             )
-            color = state_color(eye_state.status)
-
-            if eye_state.ear is None:
-                draw_text(frame, "EAR: --", 0)
-            else:
-                draw_text(frame, f"EAR: {eye_state.ear:.3f}", 0)
-                draw_text(
-                    frame,
-                    f"R: {right_ear:.3f}  L: {left_ear:.3f}",
-                    1,
-                )
-
-            if not eye_state.calibrated:
-                percent = int(eye_state.calibration_progress * 100)
-                draw_text(
-                    frame,
-                    f"CALIBRATION: {percent}% - KEEP EYES OPEN",
-                    2,
-                    color,
-                )
-            else:
-                draw_text(
-                    frame,
-                    "BASE: "
-                    f"{format_optional(eye_state.baseline_ear)}  "
-                    "REL: "
-                    f"{format_optional(eye_state.relative_ear, 2)}",
-                    2,
-                )
-                draw_text(
-                    frame,
-                    f"CLOSED: {eye_state.closed_seconds:.2f}s",
-                    3,
-                    color,
-                )
-
-            draw_text(frame, f"STATE: {eye_state.status}", 4, color)
-            draw_text(
+            draw_status_overlay(
                 frame,
-                "FACE SCORE: "
-                f"{format_optional(detection_score, 2)}",
-                8,
+                eye_state,
+                perclos_state,
+                right_ear=right_ear,
+                left_ear=left_ear,
+                detection_score=detection_score,
+                fps=logger.current_fps,
             )
-            # [PERCLOS] 화면 표시 (경고 수준이면 색 강조)
-            if eye_state.calibrated:
-                if perclos_state.is_warning:
-                    perclos_color = (0, 0, 255)
-                elif perclos_state.is_caution:
-                    perclos_color = (0, 255, 255)
-                else:
-                    perclos_color = (255, 255, 255)
-                draw_text(
-                    frame,
-                    f"PERCLOS: {perclos_state.perclos:.2f}",
-                    5,
-                    perclos_color,
-                )
-                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 6)
-                draw_text(frame, "q: quit  r: recalibrate", 7)
-            else:
-                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 5)
-                draw_text(frame, "q: quit  r: recalibrate", 6)
 
             video_writer.write(frame)
             cv2.imshow("ZZM EAR Eye Monitor", frame)
@@ -412,6 +333,7 @@ def main() -> int:
                     "baseline_ear": eye_state.baseline_ear,
                     "relative_ear": eye_state.relative_ear,
                     "closed_threshold": eye_state.closed_threshold,
+                    "reopen_threshold": eye_state.reopen_threshold,
                     "is_eye_closed": eye_state.is_closed,
                     "closed_seconds": eye_state.closed_seconds,
                     "eye_state": eye_state.status,

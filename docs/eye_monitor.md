@@ -51,7 +51,7 @@ benchmark/results/<run_id>_summary.csv
 
 The frame CSV contains the performance columns plus `ear`, `right_ear`,
 `left_ear`, `baseline_ear`, `relative_ear`, `closed_threshold`,
-`is_eye_closed`, `closed_seconds`, and `eye_state`.
+`reopen_threshold`, `is_eye_closed`, `closed_seconds`, and `eye_state`.
 
 Optional thresholds:
 
@@ -59,8 +59,17 @@ Optional thresholds:
 python3 scripts/run_eye_monitor.py \
   --calibration-seconds 3 \
   --closed-ratio 0.70 \
+  --reopen-ratio 0.80 \
   --danger-seconds 2
 ```
+
+The state machine transitions through `CALIBRATING`, `NORMAL`,
+`EYES CLOSED`, `DANGER`, and `NO FACE`. Hysteresis uses separate thresholds:
+the eyes close below `closed-ratio` and reopen at or above `reopen-ratio`.
+Values between the thresholds preserve the previous open/closed state.
+
+The on-screen status panel shows the current state, EAR, close/open
+thresholds, continuous closure time, PERCLOS, face score, and processing FPS.
 
 EAR is calculated from all six standard landmarks for each eye. The display
 shows only four derived positions per eye: left, top, right, and bottom. The

@@ -1,4 +1,4 @@
-from .calibration import EyeClosureMonitor, EyeState
+from .calibration import EyeClosureMonitor, EyeState, EyeStatus
 from .metrics import (
     LEFT_EYE_INDICES,
     MOUTH_DISPLAY_INDICES,
@@ -12,6 +12,7 @@ from .metrics import (
 __all__ = [
     "EyeClosureMonitor",
     "EyeState",
+    "EyeStatus",
     "LEFT_EYE_INDICES",
     "MOUTH_DISPLAY_INDICES",
     "RIGHT_EYE_INDICES",
