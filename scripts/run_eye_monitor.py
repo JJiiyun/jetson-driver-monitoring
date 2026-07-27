@@ -32,6 +32,7 @@ VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
 # 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
 MOUTH_LRTB_INDICES = (48, 54, 62, 66)
 EYE_FRAME_FIELDS = [
+    "detection_score",
     "ear",
     "right_ear",
     "left_ear",
@@ -52,14 +53,6 @@ def parse_args() -> argparse.Namespace:
         description="Real-time EAR calibration and eye-closure monitor."
     )
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument(
-        "--video", type=Path, default=None,
-        help="입력 영상 파일 경로. 지정하면 카메라 대신 이 영상을 처리한다.",
-    )
-    parser.add_argument(
-        "--no-show", action="store_true",
-        help="화면 창을 띄우지 않는다 (모니터 없는 환경/배치 처리용).",
-    )
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -82,7 +75,7 @@ def draw_points(
     frame: np.ndarray,
     points: np.ndarray,
     color: tuple[int, int, int],
-    radius: int = 4,
+    radius: int = 1,
 ) -> None:
     for point_x, point_y in np.rint(points).astype(int):
         cv2.circle(frame, (point_x, point_y), radius, color, -1)
@@ -125,11 +118,6 @@ def format_optional(value: float | None, precision: int = 3) -> str:
 
 
 def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
-    # 영상 파일 입력이면 파일을 그대로 연다 (카메라 설정 적용 안 함)
-    if args.video is not None:
-        cap = cv2.VideoCapture(str(args.video))
-        return cap
-
     cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
     if not cap.isOpened():
         cap.release()
@@ -174,13 +162,8 @@ def main() -> int:
     )
     cap = open_camera(args)
     if not cap.isOpened():
-        if args.video is not None:
-            print(f"[ERROR] Cannot open video file: {args.video}")
-        else:
-            print(f"[ERROR] Cannot open camera index {args.camera}.")
+        print(f"[ERROR] Cannot open camera index {args.camera}.")
         return 1
-
-    is_video = args.video is not None
 
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or args.width
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or args.height
@@ -191,11 +174,10 @@ def main() -> int:
         backend="opencv_yunet_pfld_fp32",
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
-        input_source=(f"video:{args.video.name}" if is_video
-                      else f"camera:{args.camera}"),
+        input_source=f"camera:{args.camera}",
         width=actual_width,
         height=actual_height,
-        target_fps=video_fps if is_video else args.fps,
+        target_fps=args.fps,
         extra_frame_fields=EYE_FRAME_FIELDS,
     )
 
@@ -216,7 +198,6 @@ def main() -> int:
     print("Press r to recalibrate. Press q to quit.")
     print(f"Video: {video_path}")
 
-    frame_index = 0
     try:
         while True:
             frame_started_at = time.perf_counter()
@@ -226,21 +207,15 @@ def main() -> int:
                 time.perf_counter() - capture_started_at
             ) * 1000.0
             if not success:
-                if is_video:
-                    print("End of video.")  # 영상 끝: 정상 종료
-                else:
-                    print("[ERROR] Failed to read camera frame.")
+                print("[ERROR] Failed to read camera frame.")
                 break
 
-            # 영상 파일이면 영상 기준 경과초(frame/fps), 카메라면 실제 시각.
-            # 영상 경과초를 써야 FP32/FP16을 같은 시간축으로 비교하고
-            # 라벨링(영상 0초 기준)과도 맞는다.
-            if is_video:
-                now = frame_index / video_fps
-            else:
-                now = time.monotonic()
+            now = time.monotonic()
             inference_started_at = time.perf_counter()
             detection = face_detector.detect_largest(frame)
+            detection_score = (
+                None if detection is None else detection.score
+            )
             mean_ear = None
             right_ear = None
             left_ear = None
@@ -259,7 +234,6 @@ def main() -> int:
                     mean_eye_aspect_ratio(landmarks)
                 )
 
-                # 눈 6점씩(양쪽 12점) + 입 상하좌우 4점 표시
                 draw_points(
                     frame, landmarks[list(RIGHT_EYE_INDICES)], (0, 255, 0)
                 )
@@ -267,7 +241,7 @@ def main() -> int:
                     frame, landmarks[list(LEFT_EYE_INDICES)], (0, 255, 0)
                 )
                 draw_points(
-                    frame, landmarks[list(MOUTH_LRTB_INDICES)], (255, 0, 0)
+                    frame, landmarks[list(MOUTH_LRTB_INDICES)], (0, 255, 0)
                 )
 
                 x, y, width, height = detection.box
@@ -326,6 +300,12 @@ def main() -> int:
                 )
 
             draw_text(frame, f"STATE: {eye_state.status}", 4, color)
+            draw_text(
+                frame,
+                "FACE SCORE: "
+                f"{format_optional(detection_score, 2)}",
+                8,
+            )
             # [PERCLOS] 화면 표시 (경고 수준이면 색 강조)
             if eye_state.calibrated:
                 if perclos_state.is_warning:
@@ -347,11 +327,8 @@ def main() -> int:
                 draw_text(frame, "q: quit  r: recalibrate", 6)
 
             video_writer.write(frame)
-            if not args.no_show:
-                cv2.imshow("ZZM EAR Eye Monitor", frame)
-                key = cv2.waitKey(1) & 0xFF
-            else:
-                key = 0xFF  # 화면 없이 처리 (배치 모드)
+            cv2.imshow("ZZM EAR Eye Monitor", frame)
+            key = cv2.waitKey(1) & 0xFF
 
             logger.record_frame(
                 frame_started_at=frame_started_at,
@@ -360,6 +337,7 @@ def main() -> int:
                 inference_ms=inference_ms,
                 face_count=0 if detection is None else 1,
                 extra_metrics={
+                    "detection_score": detection_score,
                     "ear": eye_state.ear,
                     "right_ear": right_ear,
                     "left_ear": left_ear,
@@ -381,8 +359,6 @@ def main() -> int:
                 monitor.reset()
                 perclos_monitor.reset()  # [PERCLOS] 재캘리브레이션 시 함께 리셋
                 print("EAR calibration reset.")
-
-            frame_index += 1
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
