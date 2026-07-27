@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -48,27 +49,86 @@ EYE_FRAME_FIELDS = [
 ]
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number greater than zero"
+        )
+    return parsed
+
+
+def open_unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number between 0 and 1 (exclusive)"
+        )
+    return parsed
+
+
+def closed_unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number between 0 and 1 (inclusive)"
+        )
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Real-time EAR calibration and eye-closure monitor."
     )
-    parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--camera", type=nonnegative_int, default=0)
+    parser.add_argument("--width", type=positive_int, default=640)
+    parser.add_argument("--height", type=positive_int, default=480)
+    parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
-    parser.add_argument("--calibration-seconds", type=float, default=3.0)
-    parser.add_argument("--closed-ratio", type=float, default=0.70)
-    parser.add_argument("--danger-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--calibration-seconds", type=positive_float, default=3.0
+    )
+    parser.add_argument(
+        "--closed-ratio", type=open_unit_interval, default=0.70
+    )
+    parser.add_argument(
+        "--danger-seconds", type=positive_float, default=2.0
+    )
     # [PERCLOS] 추가 옵션
-    parser.add_argument("--perclos-window", type=float, default=30.0)
-    parser.add_argument("--perclos-caution", type=float, default=0.15)
-    parser.add_argument("--perclos-warning", type=float, default=0.30)
-    parser.add_argument("--warmup-frames", type=int, default=30)
+    parser.add_argument(
+        "--perclos-window", type=positive_float, default=30.0
+    )
+    parser.add_argument(
+        "--perclos-caution", type=closed_unit_interval, default=0.15
+    )
+    parser.add_argument(
+        "--perclos-warning", type=closed_unit_interval, default=0.30
+    )
+    parser.add_argument("--warmup-frames", type=nonnegative_int, default=30)
     parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
     parser.add_argument("--video-codec", default="MJPG")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.perclos_caution > args.perclos_warning:
+        parser.error(
+            "--perclos-caution must be less than or equal to "
+            "--perclos-warning"
+        )
+    return args
 
 
 def draw_points(
