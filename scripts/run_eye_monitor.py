@@ -272,17 +272,14 @@ def main() -> int:
 
             now = time.monotonic()
             inference_started_at = time.perf_counter()
-            detection = face_detector.detect_largest(frame)
-            detection_score = (
-                None if detection is None else detection.score
-            )
-            mean_ear = None
-            right_ear = None
-            left_ear = None
 
+            # AI 모델 추론: YuNet + 얼굴이 검출된 경우 PFLD
+            detection = face_detector.detect_largest(frame)
+
+            landmarks = None
             if detection is not None:
                 try:
-                    landmarks, crop_box = landmark_detector.detect(
+                    landmarks, _crop_box = landmark_detector.detect(
                         frame,
                         detection.box,
                     )
@@ -290,8 +287,22 @@ def main() -> int:
                     print(f"[ERROR] Landmark inference failed: {error}")
                     break
 
-                mean_ear, right_ear, left_ear = (
-                    mean_eye_aspect_ratio(landmarks)
+            # 얼굴이 없어도 YuNet 추론 시간은 기록한다.
+            inference_ms = (
+                time.perf_counter() - inference_started_at
+            ) * 1000.0
+
+            # 추론 시간에 포함하지 않는 후처리
+            detection_score = (
+                None if detection is None else detection.score
+            )
+            mean_ear = None
+            right_ear = None
+            left_ear = None
+
+            if landmarks is not None:
+                mean_ear, right_ear, left_ear = mean_eye_aspect_ratio(
+                    landmarks
                 )
 
                 draw_points(
@@ -313,9 +324,6 @@ def main() -> int:
                     2,
                 )
 
-            inference_ms = (
-                time.perf_counter() - inference_started_at
-            ) * 1000.0
             eye_state = monitor.update(mean_ear, timestamp=now)
             # [PERCLOS] 눈 감김 판정을 PERCLOS에 연결
             perclos_state = perclos_monitor.update(
