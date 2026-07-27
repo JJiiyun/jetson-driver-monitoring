@@ -8,7 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Union
 
 
 PathLike = Union[str, Path]
@@ -124,9 +124,20 @@ class PerformanceLogger:
         width: int = 0,
         height: int = 0,
         target_fps: float = 0.0,
+        extra_frame_fields: Optional[Sequence[str]] = None,
     ) -> None:
         if warmup_frames < 0:
             raise ValueError("warmup_frames must be zero or greater")
+
+        extra_fields = list(extra_frame_fields or [])
+        duplicate_fields = set(extra_fields) & set(self.FRAME_FIELDS)
+        if duplicate_fields:
+            raise ValueError(
+                "Extra frame fields duplicate built-in fields: "
+                f"{sorted(duplicate_fields)}"
+            )
+        if len(extra_fields) != len(set(extra_fields)):
+            raise ValueError("Extra frame field names must be unique")
 
         now = datetime.now().astimezone()
         timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -140,8 +151,10 @@ class PerformanceLogger:
         self.width = width
         self.height = height
         self.target_fps = target_fps
+        self.extra_frame_fields = extra_fields
         self.started_at = now.isoformat(timespec="milliseconds")
         self.frames: List[FrameMetrics] = []
+        self.frame_extras: List[Dict[str, object]] = []
 
         self.frame_csv_path = self.output_dir / f"{self.run_id}_frames.csv"
         self.summary_csv_path = self.output_dir / f"{self.run_id}_summary.csv"
@@ -153,8 +166,17 @@ class PerformanceLogger:
         capture_ms: float,
         inference_ms: float = 0.0,
         face_count: int = 0,
+        extra_metrics: Optional[Mapping[str, object]] = None,
     ) -> FrameMetrics:
         """Record one frame using perf_counter timestamps and stage timings."""
+
+        extras = dict(extra_metrics or {})
+        unknown_fields = set(extras) - set(self.extra_frame_fields)
+        if unknown_fields:
+            raise ValueError(
+                "Unknown extra frame fields: "
+                f"{sorted(unknown_fields)}"
+            )
 
         frame_time_ms = max(
             0.0,
@@ -182,6 +204,7 @@ class PerformanceLogger:
             face_count=max(0, int(face_count)),
         )
         self.frames.append(metrics)
+        self.frame_extras.append(extras)
         return metrics
 
     @property
@@ -255,10 +278,11 @@ class PerformanceLogger:
             newline="",
             encoding="utf-8",
         ) as csv_file:
-            writer = csv.DictWriter(csv_file, fieldnames=self.FRAME_FIELDS)
+            frame_fields = self.FRAME_FIELDS + self.extra_frame_fields
+            writer = csv.DictWriter(csv_file, fieldnames=frame_fields)
             writer.writeheader()
-            for frame in self.frames:
-                writer.writerow({**common, **asdict(frame)})
+            for frame, extras in zip(self.frames, self.frame_extras):
+                writer.writerow({**common, **asdict(frame), **extras})
 
         summary = self.summary()
         with self.summary_csv_path.open(

@@ -71,6 +71,37 @@ class PerformanceLoggerTest(unittest.TestCase):
             self.assertEqual(rows[0]["face_count"], "1")
             self.assertEqual(rows[0]["is_warmup"], "False")
 
+    def test_extra_frame_metrics_are_written_to_frame_csv(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            logger = PerformanceLogger(
+                backend="eye monitor",
+                output_dir=temporary_directory,
+                warmup_frames=0,
+                extra_frame_fields=["ear", "eye_state"],
+            )
+            logger.record_frame(
+                1.000,
+                1.040,
+                10.0,
+                20.0,
+                1,
+                extra_metrics={
+                    "ear": 0.25,
+                    "eye_state": "NORMAL",
+                },
+            )
+
+            logger.write_csv()
+
+            with logger.frame_csv_path.open(
+                newline="",
+                encoding="utf-8",
+            ) as csv_file:
+                rows = list(csv.DictReader(csv_file))
+
+            self.assertEqual(rows[0]["ear"], "0.25")
+            self.assertEqual(rows[0]["eye_state"], "NORMAL")
+
 
 if __name__ == "__main__":
     unittest.main()
