@@ -18,11 +18,10 @@ from drowsiness import (
     EyeClosureMonitor,
     LEFT_EYE_INDICES,
     RIGHT_EYE_INDICES,
-    eye_display_points,
     mean_eye_aspect_ratio,
-    mouth_display_points,
 )
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
 from benchmark import PerformanceLogger
 
 
@@ -30,6 +29,8 @@ DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
+# 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
+MOUTH_LRTB_INDICES = (48, 54, 62, 66)
 EYE_FRAME_FIELDS = [
     "ear",
     "right_ear",
@@ -40,6 +41,9 @@ EYE_FRAME_FIELDS = [
     "is_eye_closed",
     "closed_seconds",
     "eye_state",
+    "perclos",          # [PERCLOS] 추가
+    "perclos_caution",  # [PERCLOS] 추가
+    "perclos_warning",  # [PERCLOS] 추가
 ]
 
 
@@ -56,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
     parser.add_argument("--closed-ratio", type=float, default=0.70)
     parser.add_argument("--danger-seconds", type=float, default=2.0)
+    # [PERCLOS] 추가 옵션
+    parser.add_argument("--perclos-window", type=float, default=30.0)
+    parser.add_argument("--perclos-caution", type=float, default=0.15)
+    parser.add_argument("--perclos-warning", type=float, default=0.30)
     parser.add_argument("--warmup-frames", type=int, default=30)
     parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
     parser.add_argument("--video-codec", default="MJPG")
@@ -66,7 +74,7 @@ def draw_points(
     frame: np.ndarray,
     points: np.ndarray,
     color: tuple[int, int, int],
-    radius: int = 4,
+    radius: int = 1,
 ) -> None:
     for point_x, point_y in np.rint(points).astype(int):
         cv2.circle(frame, (point_x, point_y), radius, color, -1)
@@ -145,6 +153,12 @@ def main() -> int:
         closed_ratio=args.closed_ratio,
         danger_seconds=args.danger_seconds,
     )
+    # [PERCLOS] 모니터 생성
+    perclos_monitor = PerclosMonitor(
+        window_seconds=args.perclos_window,
+        caution_perclos=args.perclos_caution,
+        warning_perclos=args.perclos_warning,
+    )
     cap = open_camera(args)
     if not cap.isOpened():
         print(f"[ERROR] Cannot open camera index {args.camera}.")
@@ -216,20 +230,16 @@ def main() -> int:
                     mean_eye_aspect_ratio(landmarks)
                 )
 
-                right_eye_points = eye_display_points(
-                    landmarks,
-                    RIGHT_EYE_INDICES,
+                # 눈 6점씩(양쪽 12점) + 입 상하좌우 4점 표시
+                draw_points(
+                    frame, landmarks[list(RIGHT_EYE_INDICES)], (0, 255, 0)
                 )
-                left_eye_points = eye_display_points(
-                    landmarks,
-                    LEFT_EYE_INDICES,
+                draw_points(
+                    frame, landmarks[list(LEFT_EYE_INDICES)], (0, 255, 0)
                 )
-                lip_points = mouth_display_points(landmarks)
-
-                # Exactly four visible points per eye and two for the mouth.
-                draw_points(frame, right_eye_points, (0, 255, 0))
-                draw_points(frame, left_eye_points, (0, 255, 0))
-                draw_points(frame, lip_points, (255, 0, 0))
+                draw_points(
+                    frame, landmarks[list(MOUTH_LRTB_INDICES)], (0, 255, 0)
+                )
 
                 x, y, width, height = detection.box
                 cv2.rectangle(
@@ -244,6 +254,12 @@ def main() -> int:
                 time.perf_counter() - inference_started_at
             ) * 1000.0
             eye_state = monitor.update(mean_ear, timestamp=now)
+            # [PERCLOS] 눈 감김 판정을 PERCLOS에 연결
+            perclos_state = perclos_monitor.update(
+                is_closed=eye_state.is_closed,
+                valid_face=eye_state.valid_face,
+                timestamp=now,
+            )
             color = state_color(eye_state.status)
 
             if eye_state.ear is None:
@@ -281,8 +297,25 @@ def main() -> int:
                 )
 
             draw_text(frame, f"STATE: {eye_state.status}", 4, color)
-            draw_text(frame, f"FPS: {logger.current_fps:.1f}", 5)
-            draw_text(frame, "q: quit  r: recalibrate", 6)
+            # [PERCLOS] 화면 표시 (경고 수준이면 색 강조)
+            if eye_state.calibrated:
+                if perclos_state.is_warning:
+                    perclos_color = (0, 0, 255)
+                elif perclos_state.is_caution:
+                    perclos_color = (0, 255, 255)
+                else:
+                    perclos_color = (255, 255, 255)
+                draw_text(
+                    frame,
+                    f"PERCLOS: {perclos_state.perclos:.2f}",
+                    5,
+                    perclos_color,
+                )
+                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 6)
+                draw_text(frame, "q: quit  r: recalibrate", 7)
+            else:
+                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 5)
+                draw_text(frame, "q: quit  r: recalibrate", 6)
 
             video_writer.write(frame)
             cv2.imshow("ZZM EAR Eye Monitor", frame)
@@ -304,6 +337,9 @@ def main() -> int:
                     "is_eye_closed": eye_state.is_closed,
                     "closed_seconds": eye_state.closed_seconds,
                     "eye_state": eye_state.status,
+                    "perclos": perclos_state.perclos,           # [PERCLOS]
+                    "perclos_caution": perclos_state.is_caution,  # [PERCLOS]
+                    "perclos_warning": perclos_state.is_warning,  # [PERCLOS]
                 },
             )
 
@@ -311,6 +347,7 @@ def main() -> int:
                 break
             if key == ord("r"):
                 monitor.reset()
+                perclos_monitor.reset()  # [PERCLOS] 재캘리브레이션 시 함께 리셋
                 print("EAR calibration reset.")
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
