@@ -32,6 +32,23 @@ source ~/zzmenv/bin/activate
 python3 scripts/run_eye_monitor.py
 ```
 
+`run_eye_monitor.py` is for live camera inference. To process a clean,
+unannotated source video with the original single-threshold behavior:
+
+```bash
+python3 scripts/run_video_inference.py data/minjin_test_1_raw.mp4
+```
+
+To process the same video with the FSM and EAR hysteresis:
+
+```bash
+python3 scripts/run_video_inference_FSM.py data/minjin_test_1_raw.mp4
+```
+
+Do not use a video previously produced by `run_eye_monitor.py` as the input:
+its text, bounding boxes, and landmarks are already burned into the pixels.
+Offline results are written separately under `outputs/video_inference/`.
+
 - `q`: quit
 - `r`: restart the three-second EAR calibration
 

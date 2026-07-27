@@ -39,6 +39,7 @@ class EyeClosureMonitor:
         calibration_seconds: float = 3.0,
         closed_ratio: float = 0.70,
         reopen_ratio: float = 0.80,
+        use_hysteresis: bool = True,
         danger_seconds: float = 2.0,
         min_calibration_samples: int = 15,
     ) -> None:
@@ -46,7 +47,7 @@ class EyeClosureMonitor:
             raise ValueError("calibration_seconds must be positive.")
         if not 0.0 < closed_ratio < 1.0:
             raise ValueError("closed_ratio must be between 0 and 1.")
-        if not closed_ratio < reopen_ratio <= 1.0:
+        if use_hysteresis and not closed_ratio < reopen_ratio <= 1.0:
             raise ValueError(
                 "reopen_ratio must be greater than closed_ratio "
                 "and no greater than 1."
@@ -56,7 +57,12 @@ class EyeClosureMonitor:
 
         self.calibration_seconds = float(calibration_seconds)
         self.closed_ratio = float(closed_ratio)
-        self.reopen_ratio = float(reopen_ratio)
+        self.use_hysteresis = bool(use_hysteresis)
+        self.reopen_ratio = (
+            float(reopen_ratio)
+            if self.use_hysteresis
+            else self.closed_ratio
+        )
         self.danger_seconds = float(danger_seconds)
         self.min_calibration_samples = int(min_calibration_samples)
         self.reset()
@@ -106,7 +112,9 @@ class EyeClosureMonitor:
                 )
 
         relative_ear = current_ear / max(self._baseline_ear, 1e-6)
-        if self._is_closed:
+        if not self.use_hysteresis:
+            self._is_closed = relative_ear < self.closed_ratio
+        elif self._is_closed:
             self._is_closed = relative_ear < self.reopen_ratio
         else:
             self._is_closed = relative_ear < self.closed_ratio

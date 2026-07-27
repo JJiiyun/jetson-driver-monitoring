@@ -133,6 +133,28 @@ class EyeClosureMonitorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             EyeClosureMonitor(closed_ratio=0.7, reopen_ratio=0.7)
 
+    def test_basic_mode_uses_one_threshold_without_hysteresis(self) -> None:
+        monitor = EyeClosureMonitor(
+            calibration_seconds=1.0,
+            closed_ratio=0.70,
+            reopen_ratio=0.70,
+            use_hysteresis=False,
+            min_calibration_samples=2,
+        )
+        monitor.update(0.30, timestamp=0.0)
+        monitor.update(0.30, timestamp=1.0)
+
+        self.assertEqual(
+            monitor.update(0.20, timestamp=2.0).status,
+            "EYES CLOSED",
+        )
+        reopened = monitor.update(0.22, timestamp=2.1)
+        self.assertEqual(reopened.status, "NORMAL")
+        self.assertAlmostEqual(
+            reopened.closed_threshold,
+            reopened.reopen_threshold,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
