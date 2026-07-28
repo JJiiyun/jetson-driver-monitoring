@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -22,12 +23,16 @@ from drowsiness import (
     mean_eye_aspect_ratio,
 )
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.tensorrt_pfld import TensorRTPFLDLandmarkDetector
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+DEFAULT_PFLD_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engine/pfld_sim_fp16.engine"
+)
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_OUTPUT_DIR = PROJECT_ROOT / "outputs/video_inference"
 MOUTH_LRTB_INDICES = (48, 54, 62, 66)
@@ -46,6 +51,10 @@ FRAME_FIELDS = [
     "perclos",
     "perclos_caution",
     "perclos_warning",
+    "pfld_inference_ms",
+    "face_box",
+    "crop_box",
+    "landmarks_json",
 ]
 
 
@@ -53,7 +62,7 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     mode = "FSM with hysteresis" if use_fsm else "single EAR threshold"
     parser = argparse.ArgumentParser(
         description=(
-            f"Run FP32 video inference using {mode} and save a separate "
+            f"Run video inference using {mode} and save a separate "
             "annotated video."
         )
     )
@@ -71,6 +80,30 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     )
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
+    parser.add_argument(
+        "--landmark-backend",
+        choices=("opencv-fp32", "tensorrt-fp16"),
+        default="opencv-fp32",
+        help="PFLD execution backend (default: opencv-fp32).",
+    )
+    parser.add_argument(
+        "--pfld-engine",
+        type=Path,
+        default=DEFAULT_PFLD_ENGINE_PATH,
+        help="TensorRT PFLD engine used by --landmark-backend tensorrt-fp16.",
+    )
+    parser.add_argument(
+        "--trt-warmup-iterations",
+        type=int,
+        default=5,
+        help="Untimed TensorRT calls on the first detected face (default: 5).",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Stop after this many decoded video frames.",
+    )
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
     parser.add_argument("--closed-ratio", type=float, default=0.70)
     if use_fsm:
@@ -106,6 +139,10 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         )
     if args.warmup_frames < 0:
         parser.error("--warmup-frames must be zero or greater")
+    if args.trt_warmup_iterations < 0:
+        parser.error("--trt-warmup-iterations must be zero or greater")
+    if args.max_frames is not None and args.max_frames <= 0:
+        parser.error("--max-frames must be greater than zero")
     if (
         args.output is not None
         and args.output.resolve() == args.input.resolve()
@@ -160,7 +197,12 @@ def main(use_fsm: bool = False) -> int:
             args.yunet,
             input_size=(width, height),
         )
-        landmark_detector = PFLDLandmarkDetector(args.pfld)
+        if args.landmark_backend == "tensorrt-fp16":
+            landmark_detector = TensorRTPFLDLandmarkDetector(
+                args.pfld_engine
+            )
+        else:
+            landmark_detector = PFLDLandmarkDetector(args.pfld)
         eye_monitor = EyeClosureMonitor(
             calibration_seconds=args.calibration_seconds,
             closed_ratio=args.closed_ratio,
@@ -184,9 +226,8 @@ def main(use_fsm: bool = False) -> int:
 
     logger = PerformanceLogger(
         backend=(
-            "opencv_yunet_pfld_fp32_video_fsm"
-            if use_fsm
-            else "opencv_yunet_pfld_fp32_video_basic"
+            f"{args.landmark_backend.replace('-', '_')}_video_"
+            f"{'fsm' if use_fsm else 'basic'}"
         ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
@@ -223,10 +264,12 @@ def main(use_fsm: bool = False) -> int:
             else "basic single-threshold"
         )
     )
+    print(f"Landmark backend: {args.landmark_backend}")
     print(f"Frames: {total_frames if total_frames > 0 else 'unknown'}")
     print("The first 3 seconds with a valid face are used for calibration.")
 
     frame_index = 0
+    tensorrt_warmed_up = False
     try:
         while True:
             frame_started_at = time.perf_counter()
@@ -242,12 +285,25 @@ def main(use_fsm: bool = False) -> int:
             inference_started_at = time.perf_counter()
             detection = face_detector.detect_largest(frame)
             landmarks = None
+            crop_box = None
+            pfld_inference_ms = None
             if detection is not None:
                 try:
-                    landmarks, _crop_box = landmark_detector.detect(
+                    if (
+                        args.landmark_backend == "tensorrt-fp16"
+                        and not tensorrt_warmed_up
+                    ):
+                        for _ in range(args.trt_warmup_iterations):
+                            landmark_detector.detect(frame, detection.box)
+                        tensorrt_warmed_up = True
+                    pfld_started_at = time.perf_counter()
+                    landmarks, crop_box = landmark_detector.detect(
                         frame,
                         detection.box,
                     )
+                    pfld_inference_ms = (
+                        time.perf_counter() - pfld_started_at
+                    ) * 1000.0
                 except (RuntimeError, cv2.error) as error:
                     print(
                         f"[ERROR] Landmark inference failed at frame "
@@ -335,9 +391,32 @@ def main(use_fsm: bool = False) -> int:
                     "perclos": perclos_state.perclos,
                     "perclos_caution": perclos_state.is_caution,
                     "perclos_warning": perclos_state.is_warning,
+                    "pfld_inference_ms": pfld_inference_ms,
+                    "face_box": (
+                        None
+                        if detection is None
+                        else json.dumps(
+                            [int(value) for value in detection.box]
+                        )
+                    ),
+                    "crop_box": (
+                        None
+                        if crop_box is None
+                        else json.dumps([int(value) for value in crop_box])
+                    ),
+                    "landmarks_json": (
+                        None
+                        if landmarks is None
+                        else json.dumps(landmarks.tolist())
+                    ),
                 },
             )
             frame_index += 1
+            if (
+                args.max_frames is not None
+                and frame_index >= args.max_frames
+            ):
+                break
             if frame_index % 100 == 0:
                 if total_frames > 0:
                     progress = min(100.0, frame_index / total_frames * 100.0)
@@ -350,12 +429,52 @@ def main(use_fsm: bool = False) -> int:
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        close_detector = getattr(landmark_detector, "close", None)
+        if close_detector is not None:
+            close_detector()
         writer.release()
         capture.release()
         cv2.destroyAllWindows()
 
-    summary = logger.write_csv()
+    measured_pfld_ms = [
+        float(extras["pfld_inference_ms"])
+        for frame_metrics, extras in zip(
+            logger.frames, logger.frame_extras
+        )
+        if (
+            not frame_metrics.is_warmup
+            and extras.get("pfld_inference_ms") is not None
+        )
+    ]
+    if measured_pfld_ms:
+        pfld_summary = {
+            "pfld_measured_frames": len(measured_pfld_ms),
+            "pfld_inference_mean_ms": float(np.mean(measured_pfld_ms)),
+            "pfld_inference_median_ms": float(
+                np.median(measured_pfld_ms)
+            ),
+            "pfld_inference_p95_ms": float(
+                np.percentile(measured_pfld_ms, 95)
+            ),
+        }
+    else:
+        pfld_summary = {
+            "pfld_measured_frames": 0,
+            "pfld_inference_mean_ms": None,
+            "pfld_inference_median_ms": None,
+            "pfld_inference_p95_ms": None,
+        }
+
+    summary = logger.write_csv(extra_summary_metrics=pfld_summary)
     logger.print_summary(summary)
+    print(
+        "PFLD latency: "
+        f"mean {pfld_summary['pfld_inference_mean_ms']:.2f} ms, "
+        f"median {pfld_summary['pfld_inference_median_ms']:.2f} ms, "
+        f"P95 {pfld_summary['pfld_inference_p95_ms']:.2f} ms"
+        if measured_pfld_ms
+        else "PFLD latency: N/A"
+    )
     print(f"Annotated video: {output_path}")
     print(f"Frame CSV: {logger.frame_csv_path}")
     print(f"Summary CSV: {logger.summary_csv_path}")

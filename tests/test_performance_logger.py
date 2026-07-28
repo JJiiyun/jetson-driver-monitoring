@@ -102,6 +102,27 @@ class PerformanceLoggerTest(unittest.TestCase):
             self.assertEqual(rows[0]["ear"], "0.25")
             self.assertEqual(rows[0]["eye_state"], "NORMAL")
 
+    def test_extra_summary_metrics_are_written_to_summary_csv(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            logger = PerformanceLogger(
+                backend="test backend",
+                output_dir=temporary_directory,
+                warmup_frames=0,
+            )
+            logger.record_frame(1.000, 1.040, 10.0, 20.0, 1)
+
+            summary = logger.write_csv(
+                extra_summary_metrics={"pfld_inference_mean_ms": 12.5}
+            )
+
+            self.assertEqual(summary["pfld_inference_mean_ms"], 12.5)
+            with logger.summary_csv_path.open(
+                newline="",
+                encoding="utf-8",
+            ) as csv_file:
+                row = next(csv.DictReader(csv_file))
+            self.assertEqual(row["pfld_inference_mean_ms"], "12.5")
+
 
 if __name__ == "__main__":
     unittest.main()
