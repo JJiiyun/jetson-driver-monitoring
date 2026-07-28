@@ -24,11 +24,18 @@ from drowsiness import (
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
+from drowsiness.tensorrt_pfld import TensorRTPFLDLandmarkDetector
 from benchmark import PerformanceLogger
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+DEFAULT_PFLD_FP16_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engine/pfld_sim_fp16.engine"
+)
+DEFAULT_PFLD_FP32_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engine/pfld_sim_fp32.engine"
+)
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
 # 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
@@ -48,6 +55,7 @@ EYE_FRAME_FIELDS = [
     "perclos",          # [PERCLOS] 추가
     "perclos_caution",  # [PERCLOS] 추가
     "perclos_warning",  # [PERCLOS] 추가
+    "pfld_inference_ms",
 ]
 
 
@@ -102,6 +110,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
+    parser.add_argument(
+        "--landmark-backend",
+        choices=("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16"),
+        default="opencv-fp32",
+        help="PFLD execution backend (default: opencv-fp32).",
+    )
+    parser.add_argument(
+        "--pfld-engine",
+        type=Path,
+        default=None,
+        help="Override the TensorRT engine selected for the backend.",
+    )
+    parser.add_argument(
+        "--trt-warmup-iterations",
+        type=nonnegative_int,
+        default=5,
+        help="Untimed TensorRT calls on the first detected face.",
+    )
     parser.add_argument(
         "--calibration-seconds", type=positive_float, default=3.0
     )
@@ -177,8 +203,18 @@ def main() -> int:
             args.yunet,
             input_size=(args.width, args.height),
         )
-        landmark_detector = PFLDLandmarkDetector(args.pfld)
-    except (FileNotFoundError, RuntimeError, cv2.error) as error:
+        if args.landmark_backend.startswith("tensorrt-"):
+            engine_path = args.pfld_engine
+            if engine_path is None:
+                engine_path = (
+                    DEFAULT_PFLD_FP32_ENGINE_PATH
+                    if args.landmark_backend == "tensorrt-fp32"
+                    else DEFAULT_PFLD_FP16_ENGINE_PATH
+                )
+            landmark_detector = TensorRTPFLDLandmarkDetector(engine_path)
+        else:
+            landmark_detector = PFLDLandmarkDetector(args.pfld)
+    except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         print(f"[ERROR] {error}")
         return 1
 
@@ -196,6 +232,9 @@ def main() -> int:
     )
     cap = open_camera(args)
     if not cap.isOpened():
+        close_detector = getattr(landmark_detector, "close", None)
+        if close_detector is not None:
+            close_detector()
         print(f"[ERROR] Cannot open camera index {args.camera}.")
         return 1
 
@@ -205,7 +244,7 @@ def main() -> int:
     video_fps = reported_fps if reported_fps > 1.0 else float(args.fps)
 
     logger = PerformanceLogger(
-        backend="opencv_yunet_pfld_fp32",
+        backend=f"{args.landmark_backend.replace('-', '_')}_camera_fsm",
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
         input_source=f"camera:{args.camera}",
@@ -225,13 +264,18 @@ def main() -> int:
     )
     if not video_writer.isOpened():
         cap.release()
+        close_detector = getattr(landmark_detector, "close", None)
+        if close_detector is not None:
+            close_detector()
         print(f"[ERROR] Cannot create video file: {video_path}")
         return 1
 
     print("Keep both eyes naturally open during the first 3 seconds.")
     print("Press r to recalibrate. Press q to quit.")
+    print(f"Landmark backend: {args.landmark_backend}")
     print(f"Video: {video_path}")
 
+    tensorrt_warmed_up = False
     try:
         while True:
             frame_started_at = time.perf_counter()
@@ -251,12 +295,24 @@ def main() -> int:
             detection = face_detector.detect_largest(frame)
 
             landmarks = None
+            pfld_inference_ms = None
             if detection is not None:
                 try:
+                    if (
+                        args.landmark_backend.startswith("tensorrt-")
+                        and not tensorrt_warmed_up
+                    ):
+                        for _ in range(args.trt_warmup_iterations):
+                            landmark_detector.detect(frame, detection.box)
+                        tensorrt_warmed_up = True
+                    pfld_started_at = time.perf_counter()
                     landmarks, _crop_box = landmark_detector.detect(
                         frame,
                         detection.box,
                     )
+                    pfld_inference_ms = (
+                        time.perf_counter() - pfld_started_at
+                    ) * 1000.0
                 except (RuntimeError, cv2.error) as error:
                     print(f"[ERROR] Landmark inference failed: {error}")
                     break
@@ -313,6 +369,9 @@ def main() -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+                face_box=(
+                    None if detection is None else detection.box
+                ),
             )
 
             video_writer.write(frame)
@@ -340,6 +399,7 @@ def main() -> int:
                     "perclos": perclos_state.perclos,           # [PERCLOS]
                     "perclos_caution": perclos_state.is_caution,  # [PERCLOS]
                     "perclos_warning": perclos_state.is_warning,  # [PERCLOS]
+                    "pfld_inference_ms": pfld_inference_ms,
                 },
             )
 
@@ -352,6 +412,9 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        close_detector = getattr(landmark_detector, "close", None)
+        if close_detector is not None:
+            close_detector()
         video_writer.release()
         cap.release()
         cv2.destroyAllWindows()
