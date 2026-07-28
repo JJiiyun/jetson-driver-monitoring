@@ -16,10 +16,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from benchmark import PerformanceLogger
 from drowsiness import (
+    DrowsinessRiskController,
     EyeClosureMonitor,
     LEFT_EYE_INDICES,
     RIGHT_EYE_INDICES,
     mean_eye_aspect_ratio,
+)
+from drowsiness.actions import (
+    BuzzerPatternController,
+    JetsonGPIOOutput,
+    RiskEventPublisher,
 )
 from drowsiness.detectors import (
     PFLDLandmarkDetector,
@@ -65,6 +71,12 @@ FRAME_FIELDS = [
     "mar",            # 입 종횡비 (Mouth Aspect Ratio)
     "is_yawning",     # 하품 판정 여부 (True/False)
     "yawn_seconds",   # 연속 입벌림 시간
+    "risk_level",
+    "risk_reasons",
+    "recent_yawn_count",
+    "buzzer_mode",
+    "hazard_light",
+    "stop_request",
 ]
 
 
@@ -130,6 +142,22 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         "--yawn-seconds", type=float, default=0.3,
         help="이 시간 이상 벌어져 있으면 하품 (기본 0.3초)",
     )
+    parser.add_argument(
+        "--buzzer-pin",
+        type=int,
+        default=None,
+        help="물리 부저 GPIO 핀. 생략하면 GPIO를 사용하지 않음",
+    )
+    parser.add_argument(
+        "--gpio-numbering",
+        choices=("BOARD", "BCM"),
+        default="BOARD",
+    )
+    parser.add_argument(
+        "--buzzer-active-low",
+        action="store_true",
+        help="LOW 신호에서 켜지는 부저 모듈 사용",
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -192,6 +220,7 @@ def default_output_path(
 
 def main(use_fsm: bool = False) -> int:
     args = parse_args(use_fsm)
+    buzzer_actuator = None
     capture = cv2.VideoCapture(str(args.input))
     if not capture.isOpened():
         print(f"[ERROR] Cannot open input video: {args.input}")
@@ -246,6 +275,8 @@ def main(use_fsm: bool = False) -> int:
             close_ratio=args.yawn_close_ratio,
             yawn_seconds=args.yawn_seconds,
         )
+        risk_controller = DrowsinessRiskController()
+        risk_publisher = RiskEventPublisher()
     except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         capture.release()
         print(f"[ERROR] {error}")
@@ -285,6 +316,21 @@ def main(use_fsm: bool = False) -> int:
         capture.release()
         print(f"[ERROR] Cannot create output video: {output_path}")
         return 1
+
+    if args.buzzer_pin is not None:
+        try:
+            buzzer_output = JetsonGPIOOutput(
+                args.buzzer_pin,
+                numbering=args.gpio_numbering,
+                active_high=not args.buzzer_active_low,
+            )
+            buzzer_actuator = BuzzerPatternController(buzzer_output)
+            risk_publisher.subscribe(buzzer_actuator.publish)
+        except (ValueError, RuntimeError) as error:
+            writer.release()
+            capture.release()
+            print(f"[ERROR] Cannot initialize buzzer: {error}")
+            return 1
 
     print(f"Input: {args.input}")
     print(f"Output: {output_path}")
@@ -395,6 +441,20 @@ def main(use_fsm: bool = False) -> int:
                 valid_face=eye_state.valid_face,
                 timestamp=timestamp,
             )
+            is_yawning = (
+                yawn_state.is_yawning
+                if yawn_state is not None
+                else False
+            )
+            risk_decision = risk_controller.update(
+                timestamp=timestamp,
+                eye_danger=eye_state.is_danger,
+                perclos_caution=perclos_state.is_caution,
+                perclos_warning=perclos_state.is_warning,
+                is_yawning=is_yawning,
+                valid_face=eye_state.valid_face,
+            )
+            risk_publisher.publish(risk_decision)
             draw_status_overlay(
                 frame,
                 eye_state,
@@ -403,6 +463,15 @@ def main(use_fsm: bool = False) -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+            )
+            cv2.putText(
+                frame,
+                f"RISK: {risk_decision.level.value}",
+                (20, frame.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 0, 255) if risk_decision.stop_request else (0, 200, 255),
+                2,
             )
             writer.write(frame)
 
@@ -445,6 +514,12 @@ def main(use_fsm: bool = False) -> int:
                         if yawn_state is not None
                         else 0.0
                     ),
+                    "risk_level": risk_decision.level.value,
+                    "risk_reasons": "|".join(risk_decision.reasons),
+                    "recent_yawn_count": risk_decision.recent_yawn_count,
+                    "buzzer_mode": risk_decision.buzzer_mode.value,
+                    "hazard_light": risk_decision.hazard_light,
+                    "stop_request": risk_decision.stop_request,
                 },
             )
             frame_index += 1
@@ -460,6 +535,8 @@ def main(use_fsm: bool = False) -> int:
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        if buzzer_actuator is not None:
+            buzzer_actuator.close()
         writer.release()
         capture.release()
         cv2.destroyAllWindows()
