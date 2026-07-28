@@ -30,8 +30,11 @@ from drowsiness.perclos_monitor import PerclosMonitor
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
-DEFAULT_PFLD_ENGINE_PATH = (
+DEFAULT_PFLD_FP16_ENGINE_PATH = (
     PROJECT_ROOT / "models/engine/pfld_sim_fp16.engine"
+)
+DEFAULT_PFLD_FP32_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engine/pfld_sim_fp32.engine"
 )
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_OUTPUT_DIR = PROJECT_ROOT / "outputs/video_inference"
@@ -82,15 +85,18 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
         "--landmark-backend",
-        choices=("opencv-fp32", "tensorrt-fp16"),
+        choices=("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16"),
         default="opencv-fp32",
         help="PFLD execution backend (default: opencv-fp32).",
     )
     parser.add_argument(
         "--pfld-engine",
         type=Path,
-        default=DEFAULT_PFLD_ENGINE_PATH,
-        help="TensorRT PFLD engine used by --landmark-backend tensorrt-fp16.",
+        default=None,
+        help=(
+            "Override the default TensorRT PFLD engine selected for the "
+            "requested backend."
+        ),
     )
     parser.add_argument(
         "--trt-warmup-iterations",
@@ -105,12 +111,12 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         help="Stop after this many decoded video frames.",
     )
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
-    parser.add_argument("--closed-ratio", type=float, default=0.70)
+    parser.add_argument("--closed-ratio", type=float, default=0.72)
     if use_fsm:
-        parser.add_argument("--reopen-ratio", type=float, default=0.80)
+        parser.add_argument("--reopen-ratio", type=float, default=0.85)
     else:
         parser.set_defaults(reopen_ratio=None)
-    parser.add_argument("--danger-seconds", type=float, default=2.0)
+    parser.add_argument("--danger-seconds", type=float, default=1.7)
     parser.add_argument("--perclos-window", type=float, default=30.0)
     parser.add_argument("--perclos-caution", type=float, default=0.15)
     parser.add_argument("--perclos-warning", type=float, default=0.30)
@@ -197,9 +203,16 @@ def main(use_fsm: bool = False) -> int:
             args.yunet,
             input_size=(width, height),
         )
-        if args.landmark_backend == "tensorrt-fp16":
+        if args.landmark_backend.startswith("tensorrt-"):
+            engine_path = args.pfld_engine
+            if engine_path is None:
+                engine_path = (
+                    DEFAULT_PFLD_FP32_ENGINE_PATH
+                    if args.landmark_backend == "tensorrt-fp32"
+                    else DEFAULT_PFLD_FP16_ENGINE_PATH
+                )
             landmark_detector = TensorRTPFLDLandmarkDetector(
-                args.pfld_engine
+                engine_path
             )
         else:
             landmark_detector = PFLDLandmarkDetector(args.pfld)
@@ -290,7 +303,7 @@ def main(use_fsm: bool = False) -> int:
             if detection is not None:
                 try:
                     if (
-                        args.landmark_backend == "tensorrt-fp16"
+                        args.landmark_backend.startswith("tensorrt-")
                         and not tensorrt_warmed_up
                     ):
                         for _ in range(args.trt_warmup_iterations):
