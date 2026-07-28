@@ -106,13 +106,13 @@ def parse_args() -> argparse.Namespace:
         "--calibration-seconds", type=positive_float, default=3.0
     )
     parser.add_argument(
-        "--closed-ratio", type=open_unit_interval, default=0.70
+        "--closed-ratio", type=open_unit_interval, default=0.72
     )
     parser.add_argument(
-        "--reopen-ratio", type=closed_unit_interval, default=0.80
+        "--reopen-ratio", type=closed_unit_interval, default=0.85
     )
     parser.add_argument(
-        "--danger-seconds", type=positive_float, default=2.0
+        "--danger-seconds", type=positive_float, default=1.7
     )
     # [PERCLOS] 추가 옵션
     parser.add_argument(
