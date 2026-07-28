@@ -375,6 +375,9 @@ def main(use_fsm: bool = False) -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+                face_box=(
+                    None if detection is None else detection.box
+                ),
             )
             writer.write(frame)
 
