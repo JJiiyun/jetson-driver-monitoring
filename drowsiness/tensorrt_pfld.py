@@ -55,16 +55,19 @@ class TensorRTPFLDLandmarkDetector:
             )
 
         self._cuda_context = cuda.Device(device_id).retain_primary_context()
-        self._cuda_context.push()
         try:
-            self._initialize_engine(path)
+            self._cuda_context.push()
+            try:
+                self._initialize_engine(path)
+            except Exception:
+                self._release_cuda_resources()
+                raise
+            finally:
+                cuda.Context.pop()
         except Exception:
-            self._release_cuda_resources()
             self._cuda_context.detach()
             self._cuda_context = None
             raise
-        finally:
-            cuda.Context.pop()
 
     def _initialize_engine(self, path: Path) -> None:
         trt = self._trt
@@ -140,11 +143,11 @@ class TensorRTPFLDLandmarkDetector:
                 f"got {output_count}."
             )
 
-        input_dtype = np.dtype(
-            trt.nptype(self._engine.get_binding_dtype(self._input_index))
+        input_dtype = self._numpy_dtype(
+            self._engine.get_binding_dtype(self._input_index)
         )
-        output_dtype = np.dtype(
-            trt.nptype(self._engine.get_binding_dtype(self._output_index))
+        output_dtype = self._numpy_dtype(
+            self._engine.get_binding_dtype(self._output_index)
         )
         self._input_host = cuda.pagelocked_empty(input_count, input_dtype)
         self._output_host = cuda.pagelocked_empty(output_count, output_dtype)
@@ -154,6 +157,23 @@ class TensorRTPFLDLandmarkDetector:
         self._bindings[self._input_index] = int(self._input_device)
         self._bindings[self._output_index] = int(self._output_device)
         self._stream = cuda.Stream()
+
+    def _numpy_dtype(self, tensor_dtype: Any) -> np.dtype[Any]:
+        """Map TensorRT 8 data types without using its NumPy 1.24-incompatible helper."""
+        trt = self._trt
+        dtype_map = {
+            trt.DataType.FLOAT: np.dtype(np.float32),
+            trt.DataType.HALF: np.dtype(np.float16),
+            trt.DataType.INT8: np.dtype(np.int8),
+            trt.DataType.INT32: np.dtype(np.int32),
+            trt.DataType.BOOL: np.dtype(np.bool_),
+        }
+        try:
+            return dtype_map[tensor_dtype]
+        except KeyError as error:
+            raise RuntimeError(
+                f"Unsupported TensorRT binding data type: {tensor_dtype}."
+            ) from error
 
     def detect(
         self,
