@@ -21,7 +21,11 @@ from drowsiness import (
     RIGHT_EYE_INDICES,
     mean_eye_aspect_ratio,
 )
-from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.detectors import (
+    PFLDLandmarkDetector,
+    PFLDTensorRTDetector,
+    YuNetFaceDetector,
+)
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
 from benchmark import PerformanceLogger
@@ -29,6 +33,9 @@ from benchmark import PerformanceLogger
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+DEFAULT_PFLD_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
+)
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
 # 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
@@ -103,6 +110,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
+        "--opencv-device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="OpenCV DNN device for YuNet and ONNX PFLD (default: cpu)",
+    )
+    parser.add_argument(
+        "--landmark-backend",
+        choices=("opencv", "tensorrt"),
+        default="opencv",
+        help="PFLD inference backend (default: opencv)",
+    )
+    parser.add_argument(
+        "--pfld-engine", type=Path, default=DEFAULT_PFLD_ENGINE_PATH
+    )
+    parser.add_argument(
         "--calibration-seconds", type=positive_float, default=3.0
     )
     parser.add_argument(
@@ -176,8 +198,15 @@ def main() -> int:
         face_detector = YuNetFaceDetector(
             args.yunet,
             input_size=(args.width, args.height),
+            device=args.opencv_device,
         )
-        landmark_detector = PFLDLandmarkDetector(args.pfld)
+        landmark_detector = (
+            PFLDTensorRTDetector(args.pfld_engine)
+            if args.landmark_backend == "tensorrt"
+            else PFLDLandmarkDetector(
+                args.pfld, device=args.opencv_device
+            )
+        )
     except (FileNotFoundError, RuntimeError, cv2.error) as error:
         print(f"[ERROR] {error}")
         return 1
@@ -205,7 +234,11 @@ def main() -> int:
     video_fps = reported_fps if reported_fps > 1.0 else float(args.fps)
 
     logger = PerformanceLogger(
-        backend="opencv_yunet_pfld_fp32",
+        backend=(
+            f"opencv_{args.opencv_device}_yunet_pfld_tensorrt_fp16"
+            if args.landmark_backend == "tensorrt"
+            else f"opencv_{args.opencv_device}_yunet_pfld_fp32"
+        ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
         input_source=f"camera:{args.camera}",

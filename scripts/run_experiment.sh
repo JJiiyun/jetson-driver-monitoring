@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # 실험 자동화: 추론 -> 채점 -> 지표 리포트까지 한 번에
 #
 # 사용법:
@@ -10,10 +10,15 @@
 #
 # 파라미터 안 주면 기본값(0.72 / 0.85 / 1.7) 사용.
 
-VIDEO="$1"
+set -euo pipefail
+
+VIDEO="${1:-}"
 CLOSED="${2:-0.72}"
 REOPEN="${3:-0.85}"
 DANGER="${4:-1.7}"
+YAWN_OPEN="0.18"
+YAWN_CLOSE="0.14"
+YAWN_SECONDS="0.3"
 
 if [ -z "$VIDEO" ] || [ ! -f "$VIDEO" ]; then
     echo "사용법: bash run_experiment.sh <영상경로> [closed] [reopen] [danger]"
@@ -21,11 +26,24 @@ if [ -z "$VIDEO" ] || [ ! -f "$VIDEO" ]; then
     exit 1
 fi
 
-PROJECT=~/jetson-driver-monitoring
+VIDEO="$(realpath "$VIDEO")"
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS="$PROJECT/scripts"
 BENCH="$PROJECT/benchmark"
 RESULTS="$BENCH/results"
 LABELS="$RESULTS/labels/labels.csv"
+
+source "$PROJECT/zzmvenv/bin/activate"
+source "$SCRIPTS/use_opencv_cuda.sh"
+
+python3 - <<'PY'
+import cv2
+
+print("OpenCV:", cv2.__version__)
+print("CUDA devices:", cv2.cuda.getCudaEnabledDeviceCount())
+if cv2.cuda.getCudaEnabledDeviceCount() < 1:
+    raise SystemExit("[ERROR] OpenCV cannot see a CUDA device.")
+PY
 
 # 영상 해상도 (파일명 태그용)
 RES=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
@@ -36,6 +54,8 @@ echo "=========================================="
 echo "실험 시작: $(date)"
 echo "  영상: $VIDEO (해상도 $RES)"
 echo "  파라미터: closed=$CLOSED reopen=$REOPEN danger=$DANGER"
+echo "  하품 파라미터: open=$YAWN_OPEN close=$YAWN_CLOSE duration=$YAWN_SECONDS"
+echo "  추론 환경: OpenCV CUDA FP32 (YuNet + PFLD)"
 echo "=========================================="
 
 # 1) 추론
@@ -43,13 +63,14 @@ echo ""
 echo "[1/3] 추론 실행 중..."
 cd "$SCRIPTS"
 python3 run_video_inference_FSM.py "$VIDEO" \
+    --landmark-backend opencv \
+    --opencv-device cuda \
     --closed-ratio "$CLOSED" \
     --reopen-ratio "$REOPEN" \
-    --danger-seconds "$DANGER"
-if [ $? -ne 0 ]; then
-    echo "[ERROR] 추론 실패"
-    exit 1
-fi
+    --danger-seconds "$DANGER" \
+    --yawn-open-ratio "$YAWN_OPEN" \
+    --yawn-close-ratio "$YAWN_CLOSE" \
+    --yawn-seconds "$YAWN_SECONDS"
 
 # 2) 방금 생성된 최신 frames/summary 자동 탐지
 FRAMES=$(ls -t "$RESULTS"/*_frames.csv | head -1)

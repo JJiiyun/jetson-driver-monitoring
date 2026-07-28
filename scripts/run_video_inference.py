@@ -21,16 +21,30 @@ from drowsiness import (
     RIGHT_EYE_INDICES,
     mean_eye_aspect_ratio,
 )
-from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.detectors import (
+    PFLDLandmarkDetector,
+    PFLDTensorRTDetector,
+    YuNetFaceDetector,
+)
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor
+# === [하품 추가 1] YawnMonitor import ===
+# 하품 검출 모듈. drowsiness/yawn_monitor.py 에 위치.
+from drowsiness.yawn_monitor import YawnMonitor
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+DEFAULT_PFLD_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
+)
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_OUTPUT_DIR = PROJECT_ROOT / "outputs/video_inference"
+
+# 입 랜드마크 4점 (68점 dlib 표준): 좌=48, 우=54, 상=62, 하=66
+# MAR = 세로거리(62-66) / 가로거리(48-54)
 MOUTH_LRTB_INDICES = (48, 54, 62, 66)
+
 FRAME_FIELDS = [
     "detection_score",
     "ear",
@@ -46,6 +60,11 @@ FRAME_FIELDS = [
     "perclos",
     "perclos_caution",
     "perclos_warning",
+    # === [하품 추가 2] CSV 컬럼 3개 ===
+    # 이 필드들이 있어야 evaluate.py가 하품을 채점할 수 있다.
+    "mar",            # 입 종횡비 (Mouth Aspect Ratio)
+    "is_yawning",     # 하품 판정 여부 (True/False)
+    "yawn_seconds",   # 연속 입벌림 시간
 ]
 
 
@@ -71,6 +90,21 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     )
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
+    parser.add_argument(
+        "--opencv-device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="OpenCV DNN device for YuNet and ONNX PFLD (default: cpu)",
+    )
+    parser.add_argument(
+        "--landmark-backend",
+        choices=("opencv", "tensorrt"),
+        default="opencv",
+        help="PFLD inference backend (default: opencv)",
+    )
+    parser.add_argument(
+        "--pfld-engine", type=Path, default=DEFAULT_PFLD_ENGINE_PATH
+    )
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
     parser.add_argument("--closed-ratio", type=float, default=0.70)
     if use_fsm:
@@ -82,6 +116,20 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     parser.add_argument("--perclos-caution", type=float, default=0.15)
     parser.add_argument("--perclos-warning", type=float, default=0.30)
     parser.add_argument("--warmup-frames", type=int, default=30)
+    # === [하품 추가 3] 하품 임계값 옵션 ===
+    # 명령줄에서 조정 가능하게. 실제 하품 영상 보고 튜닝하면 된다.
+    parser.add_argument(
+        "--yawn-open-ratio", type=float, default=0.18,
+        help="MAR이 이 값 이상이면 입 벌어짐 (기본 0.18)",
+    )
+    parser.add_argument(
+        "--yawn-close-ratio", type=float, default=0.14,
+        help="MAR이 이 값 아래로 내려가야 닫힘 (히스테리시스, 기본 0.14)",
+    )
+    parser.add_argument(
+        "--yawn-seconds", type=float, default=0.3,
+        help="이 시간 이상 벌어져 있으면 하품 (기본 0.3초)",
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -106,6 +154,13 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         )
     if args.warmup_frames < 0:
         parser.error("--warmup-frames must be zero or greater")
+    # === [하품 추가 3-1] 하품 임계값 검증 ===
+    if not 0.0 < args.yawn_close_ratio < args.yawn_open_ratio:
+        parser.error(
+            "--yawn-close-ratio must be > 0 and < --yawn-open-ratio"
+        )
+    if args.yawn_seconds <= 0.0:
+        parser.error("--yawn-seconds must be greater than zero")
     if (
         args.output is not None
         and args.output.resolve() == args.input.resolve()
@@ -159,8 +214,15 @@ def main(use_fsm: bool = False) -> int:
         face_detector = YuNetFaceDetector(
             args.yunet,
             input_size=(width, height),
+            device=args.opencv_device,
         )
-        landmark_detector = PFLDLandmarkDetector(args.pfld)
+        landmark_detector = (
+            PFLDTensorRTDetector(args.pfld_engine)
+            if args.landmark_backend == "tensorrt"
+            else PFLDLandmarkDetector(
+                args.pfld, device=args.opencv_device
+            )
+        )
         eye_monitor = EyeClosureMonitor(
             calibration_seconds=args.calibration_seconds,
             closed_ratio=args.closed_ratio,
@@ -177,16 +239,27 @@ def main(use_fsm: bool = False) -> int:
             caution_perclos=args.perclos_caution,
             warning_perclos=args.perclos_warning,
         )
+        # === [하품 추가 4] YawnMonitor 초기화 ===
+        # 눈 감김 EyeClosureMonitor와 같은 구조(히스테리시스 + 지속시간).
+        yawn_monitor = YawnMonitor(
+            open_ratio=args.yawn_open_ratio,
+            close_ratio=args.yawn_close_ratio,
+            yawn_seconds=args.yawn_seconds,
+        )
     except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         capture.release()
         print(f"[ERROR] {error}")
         return 1
 
+    landmark_backend_name = (
+        "tensorrt_fp16"
+        if args.landmark_backend == "tensorrt"
+        else "fp32"
+    )
     logger = PerformanceLogger(
         backend=(
-            "opencv_yunet_pfld_fp32_video_fsm"
-            if use_fsm
-            else "opencv_yunet_pfld_fp32_video_basic"
+            f"opencv_{args.opencv_device}_yunet_pfld_{landmark_backend_name}"
+            f"_video_{'fsm' if use_fsm else 'basic'}"
         ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
@@ -264,10 +337,28 @@ def main(use_fsm: bool = False) -> int:
             mean_ear = None
             right_ear = None
             left_ear = None
+            # === [하품 추가 5] MAR / 하품 상태 변수 초기화 ===
+            mar_value = None
+            yawn_state = None
             if landmarks is not None:
                 mean_ear, right_ear, left_ear = mean_eye_aspect_ratio(
                     landmarks
                 )
+                # === [하품 추가 6] MAR 계산 (입 4점) ===
+                # 좌48-우54 = 가로, 상62-하66 = 세로
+                # 입이 벌어질수록 세로가 커져 MAR이 커진다.
+                left_pt = landmarks[MOUTH_LRTB_INDICES[0]]    # 48
+                right_pt = landmarks[MOUTH_LRTB_INDICES[1]]   # 54
+                top_pt = landmarks[MOUTH_LRTB_INDICES[2]]     # 62
+                bottom_pt = landmarks[MOUTH_LRTB_INDICES[3]]  # 66
+                h_dist = float(np.linalg.norm(left_pt - right_pt))
+                v_dist = float(np.linalg.norm(top_pt - bottom_pt))
+                mar_value = v_dist / h_dist if h_dist > 1e-6 else 0.0
+                # 하품 상태 갱신 (timestamp는 frame_index/fps = 정확한 시간축)
+                yawn_state = yawn_monitor.update(
+                    mar_value, timestamp=timestamp
+                )
+
                 draw_points(
                     frame,
                     landmarks[list(RIGHT_EYE_INDICES)],
@@ -291,6 +382,12 @@ def main(use_fsm: bool = False) -> int:
                     (0, 255, 0),
                     2,
                 )
+                # === [하품 추가 7] 화면에 하품 표시 (선택) ===
+                if yawn_state is not None and yawn_state.is_yawning:
+                    cv2.putText(
+                        frame, "YAWNING", (x, max(0, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2,
+                    )
 
             eye_state = eye_monitor.update(mean_ear, timestamp=timestamp)
             perclos_state = perclos_monitor.update(
@@ -335,6 +432,19 @@ def main(use_fsm: bool = False) -> int:
                     "perclos": perclos_state.perclos,
                     "perclos_caution": perclos_state.is_caution,
                     "perclos_warning": perclos_state.is_warning,
+                    # === [하품 추가 8] CSV에 하품 데이터 기록 ===
+                    # landmarks 없으면 mar=None, 하품=False로 기록
+                    "mar": mar_value,
+                    "is_yawning": (
+                        yawn_state.is_yawning
+                        if yawn_state is not None
+                        else False
+                    ),
+                    "yawn_seconds": (
+                        yawn_state.open_seconds
+                        if yawn_state is not None
+                        else 0.0
+                    ),
                 },
             )
             frame_index += 1

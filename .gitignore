@@ -50,9 +50,13 @@ models/*
 # Benchmark results
 benchmark/results/*
 !benchmark/results/.gitkeep
+!benchmark/results/labels.csv
 
 # Temporary files
 *.tmp
+
+# Locally compiled dependencies
+third_party/opencv-cuda-4.8.0/
 *.swp
 *~
 

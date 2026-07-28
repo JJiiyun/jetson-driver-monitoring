@@ -61,6 +61,10 @@ python --version
 echo
 echo "[5/6] Installing project packages"
 
+export CUDA_ROOT="${CUDA_ROOT:-/usr/local/cuda-10.2}"
+export PATH="${CUDA_ROOT}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_ROOT}/lib64:${CUDA_ROOT}/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}"
+
 python -m pip install --upgrade "pip<24" setuptools wheel
 
 if [ -f "${REQUIREMENTS_FILE}" ]; then
@@ -81,6 +85,7 @@ required_modules = [
     ("NumPy", "numpy"),
     ("OpenCV", "cv2"),
     ("TensorRT", "tensorrt"),
+    ("PyCUDA", "pycuda"),
 ]
 
 failed = False
