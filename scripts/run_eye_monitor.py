@@ -25,6 +25,7 @@ from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
 from drowsiness.tensorrt_pfld import TensorRTPFLDLandmarkDetector
+from drowsiness.yawn_monitor import YawnMonitor
 from benchmark import PerformanceLogger
 
 
@@ -56,6 +57,10 @@ EYE_FRAME_FIELDS = [
     "perclos_caution",  # [PERCLOS] 추가
     "perclos_warning",  # [PERCLOS] 추가
     "pfld_inference_ms",
+    "mar",
+    "is_yawning",
+    "yawn_seconds",
+    "yawn_state",
 ]
 
 
@@ -140,6 +145,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--danger-seconds", type=positive_float, default=1.7
     )
+    parser.add_argument(
+        "--yawn-open-ratio",
+        type=positive_float,
+        default=0.18,
+    )
+    parser.add_argument(
+        "--yawn-close-ratio",
+        type=positive_float,
+        default=0.14,
+    )
+    parser.add_argument(
+        "--yawn-seconds",
+        type=positive_float,
+        default=0.3,
+    )
     # [PERCLOS] 추가 옵션
     parser.add_argument(
         "--perclos-window", type=positive_float, default=30.0
@@ -162,6 +182,10 @@ def parse_args() -> argparse.Namespace:
     if args.closed_ratio >= args.reopen_ratio:
         parser.error(
             "--reopen-ratio must be greater than --closed-ratio"
+        )
+    if args.yawn_close_ratio >= args.yawn_open_ratio:
+        parser.error(
+            "--yawn-close-ratio must be less than --yawn-open-ratio"
         )
     return args
 
@@ -229,6 +253,11 @@ def main() -> int:
         window_seconds=args.perclos_window,
         caution_perclos=args.perclos_caution,
         warning_perclos=args.perclos_warning,
+    )
+    yawn_monitor = YawnMonitor(
+        open_ratio=args.yawn_open_ratio,
+        close_ratio=args.yawn_close_ratio,
+        yawn_seconds=args.yawn_seconds,
     )
     cap = open_camera(args)
     if not cap.isOpened():
@@ -329,10 +358,31 @@ def main() -> int:
             mean_ear = None
             right_ear = None
             left_ear = None
+            mar_value = None
+            yawn_state = None
 
             if landmarks is not None:
                 mean_ear, right_ear, left_ear = mean_eye_aspect_ratio(
                     landmarks
+                )
+                mouth_left = landmarks[MOUTH_LRTB_INDICES[0]]
+                mouth_right = landmarks[MOUTH_LRTB_INDICES[1]]
+                mouth_top = landmarks[MOUTH_LRTB_INDICES[2]]
+                mouth_bottom = landmarks[MOUTH_LRTB_INDICES[3]]
+                mouth_width = float(
+                    np.linalg.norm(mouth_left - mouth_right)
+                )
+                mouth_height = float(
+                    np.linalg.norm(mouth_top - mouth_bottom)
+                )
+                mar_value = (
+                    mouth_height / mouth_width
+                    if mouth_width > 1e-6
+                    else 0.0
+                )
+                yawn_state = yawn_monitor.update(
+                    mar_value,
+                    timestamp=now,
                 )
 
                 draw_points(
@@ -353,6 +403,19 @@ def main() -> int:
                     (0, 255, 0),
                     2,
                 )
+                if yawn_state.is_yawning:
+                    cv2.putText(
+                        frame,
+                        "YAWNING",
+                        (x, max(24, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 165, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+            else:
+                yawn_monitor.reset()
 
             eye_state = monitor.update(mean_ear, timestamp=now)
             # [PERCLOS] 눈 감김 판정을 PERCLOS에 연결
@@ -400,6 +463,22 @@ def main() -> int:
                     "perclos_caution": perclos_state.is_caution,  # [PERCLOS]
                     "perclos_warning": perclos_state.is_warning,  # [PERCLOS]
                     "pfld_inference_ms": pfld_inference_ms,
+                    "mar": mar_value,
+                    "is_yawning": (
+                        False
+                        if yawn_state is None
+                        else yawn_state.is_yawning
+                    ),
+                    "yawn_seconds": (
+                        0.0
+                        if yawn_state is None
+                        else yawn_state.open_seconds
+                    ),
+                    "yawn_state": (
+                        "NO FACE"
+                        if yawn_state is None
+                        else yawn_state.status
+                    ),
                 },
             )
 
@@ -408,6 +487,7 @@ def main() -> int:
             if key == ord("r"):
                 monitor.reset()
                 perclos_monitor.reset()  # [PERCLOS] 재캘리브레이션 시 함께 리셋
+                yawn_monitor.reset()
                 print("EAR calibration reset.")
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")

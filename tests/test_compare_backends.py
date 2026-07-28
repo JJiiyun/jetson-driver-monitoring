@@ -29,8 +29,10 @@ def make_row(
         "target_fps": "30.0",
         "is_warmup": "False",
         "ear": str(0.25 + offset),
+        "mar": str(0.10 + offset),
         "eye_state": state,
         "is_eye_closed": "False",
+        "is_yawning": "False",
         "pfld_inference_ms": str(20.0 + offset),
         "inference_ms": str(80.0 + offset),
         "frame_time_ms": str(100.0 + offset),
@@ -52,7 +54,9 @@ class CompareBackendsTest(unittest.TestCase):
             summary["landmark_mean_error_px"], 2**0.5 / 2
         )
         self.assertAlmostEqual(summary["ear_mean_absolute_error"], 0.5)
+        self.assertAlmostEqual(summary["mar_mean_absolute_error"], 0.5)
         self.assertEqual(summary["fsm_state_match_rate"], 1.0)
+        self.assertEqual(summary["yawn_state_match_rate"], 1.0)
         self.assertEqual(summary["pfld_fp16_speedup"], 2.0)
 
     def test_alignment_rejects_different_frame_sets(self):

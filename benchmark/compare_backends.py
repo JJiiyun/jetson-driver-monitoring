@@ -45,8 +45,10 @@ def load_rows(path: Path) -> dict[int, dict[str, str]]:
             "target_fps",
             "is_warmup",
             "ear",
+            "mar",
             "eye_state",
             "is_eye_closed",
+            "is_yawning",
             "pfld_inference_ms",
             "inference_ms",
             "frame_time_ms",
@@ -163,6 +165,13 @@ def compare(
             if fp32_ear is not None and fp16_ear is not None
             else None
         )
+        fp32_mar = optional_float(fp32, "mar")
+        fp16_mar = optional_float(fp16, "mar")
+        mar_absolute_error = (
+            abs(fp32_mar - fp16_mar)
+            if fp32_mar is not None and fp16_mar is not None
+            else None
+        )
         comparisons.append(
             {
                 "frame_index": frame_index,
@@ -175,12 +184,19 @@ def compare(
                 "fp32_ear": fp32_ear,
                 "fp16_ear": fp16_ear,
                 "ear_absolute_error": ear_absolute_error,
+                "fp32_mar": fp32_mar,
+                "fp16_mar": fp16_mar,
+                "mar_absolute_error": mar_absolute_error,
                 "fp32_eye_state": fp32["eye_state"],
                 "fp16_eye_state": fp16["eye_state"],
                 "fsm_state_match": fp32["eye_state"] == fp16["eye_state"],
                 "eye_closed_match": (
                     truthy(fp32["is_eye_closed"])
                     == truthy(fp16["is_eye_closed"])
+                ),
+                "yawn_state_match": (
+                    truthy(fp32["is_yawning"])
+                    == truthy(fp16["is_yawning"])
                 ),
                 "fp32_pfld_ms": optional_float(fp32, "pfld_inference_ms"),
                 "fp16_pfld_ms": optional_float(fp16, "pfld_inference_ms"),
@@ -206,6 +222,11 @@ def compare(
         row["ear_absolute_error"]
         for row in comparisons
         if row["ear_absolute_error"] is not None
+    ]
+    mar_errors = [
+        row["mar_absolute_error"]
+        for row in comparisons
+        if row["mar_absolute_error"] is not None
     ]
 
     def measured_values(field: str) -> list[float]:
@@ -235,11 +256,17 @@ def compare(
         "ear_compared_frames": len(ear_errors),
         "ear_mean_absolute_error": mean(ear_errors),
         "ear_max_absolute_error": max(ear_errors) if ear_errors else None,
+        "mar_compared_frames": len(mar_errors),
+        "mar_mean_absolute_error": mean(mar_errors),
+        "mar_max_absolute_error": max(mar_errors) if mar_errors else None,
         "fsm_state_match_rate": mean(
             [float(row["fsm_state_match"]) for row in comparisons]
         ),
         "eye_closed_match_rate": mean(
             [float(row["eye_closed_match"]) for row in comparisons]
+        ),
+        "yawn_state_match_rate": mean(
+            [float(row["yawn_state_match"]) for row in comparisons]
         ),
         "fp32_pfld_mean_ms": mean(fp32_pfld),
         "fp16_pfld_mean_ms": mean(fp16_pfld),
@@ -327,6 +354,15 @@ def main() -> int:
     print(
         "FSM state match: "
         f"{format_metric(summary['fsm_state_match_rate'] * 100, 2)}%"
+    )
+    print(
+        "MAR error: mean "
+        f"{format_metric(summary['mar_mean_absolute_error'])}, max "
+        f"{format_metric(summary['mar_max_absolute_error'])}"
+    )
+    print(
+        "Yawn state match: "
+        f"{format_metric(summary['yawn_state_match_rate'] * 100, 2)}%"
     )
     print(
         "PFLD FP16 speedup: "
