@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from drowsiness import (
     mean_eye_aspect_ratio,
 )
 from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
 from benchmark import PerformanceLogger
 
@@ -32,12 +34,14 @@ VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
 # 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
 MOUTH_LRTB_INDICES = (48, 54, 62, 66)
 EYE_FRAME_FIELDS = [
+    "detection_score",
     "ear",
     "right_ear",
     "left_ear",
     "baseline_ear",
     "relative_ear",
     "closed_threshold",
+    "reopen_threshold",
     "is_eye_closed",
     "closed_seconds",
     "eye_state",
@@ -47,27 +51,93 @@ EYE_FRAME_FIELDS = [
 ]
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number greater than zero"
+        )
+    return parsed
+
+
+def open_unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number between 0 and 1 (exclusive)"
+        )
+    return parsed
+
+
+def closed_unit_interval(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "must be a finite number between 0 and 1 (inclusive)"
+        )
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Real-time EAR calibration and eye-closure monitor."
     )
-    parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--camera", type=nonnegative_int, default=0)
+    parser.add_argument("--width", type=positive_int, default=640)
+    parser.add_argument("--height", type=positive_int, default=480)
+    parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
-    parser.add_argument("--calibration-seconds", type=float, default=3.0)
-    parser.add_argument("--closed-ratio", type=float, default=0.70)
-    parser.add_argument("--danger-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--calibration-seconds", type=positive_float, default=3.0
+    )
+    parser.add_argument(
+        "--closed-ratio", type=open_unit_interval, default=0.70
+    )
+    parser.add_argument(
+        "--reopen-ratio", type=closed_unit_interval, default=0.80
+    )
+    parser.add_argument(
+        "--danger-seconds", type=positive_float, default=2.0
+    )
     # [PERCLOS] 추가 옵션
-    parser.add_argument("--perclos-window", type=float, default=30.0)
-    parser.add_argument("--perclos-caution", type=float, default=0.15)
-    parser.add_argument("--perclos-warning", type=float, default=0.30)
-    parser.add_argument("--warmup-frames", type=int, default=30)
+    parser.add_argument(
+        "--perclos-window", type=positive_float, default=30.0
+    )
+    parser.add_argument(
+        "--perclos-caution", type=closed_unit_interval, default=0.15
+    )
+    parser.add_argument(
+        "--perclos-warning", type=closed_unit_interval, default=0.30
+    )
+    parser.add_argument("--warmup-frames", type=nonnegative_int, default=30)
     parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
     parser.add_argument("--video-codec", default="MJPG")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.perclos_caution > args.perclos_warning:
+        parser.error(
+            "--perclos-caution must be less than or equal to "
+            "--perclos-warning"
+        )
+    if args.closed_ratio >= args.reopen_ratio:
+        parser.error(
+            "--reopen-ratio must be greater than --closed-ratio"
+        )
+    return args
 
 
 def draw_points(
@@ -78,42 +148,6 @@ def draw_points(
 ) -> None:
     for point_x, point_y in np.rint(points).astype(int):
         cv2.circle(frame, (point_x, point_y), radius, color, -1)
-
-
-def draw_text(
-    frame: np.ndarray,
-    text: str,
-    row: int,
-    color: tuple[int, int, int] = (255, 255, 255),
-) -> None:
-    cv2.putText(
-        frame,
-        text,
-        (20, 30 + row * 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        color,
-        2,
-        cv2.LINE_AA,
-    )
-
-
-def state_color(status: str) -> tuple[int, int, int]:
-    if status == "DANGER":
-        return 0, 0, 255
-    if status == "EYES CLOSED":
-        return 0, 165, 255
-    if status == "CALIBRATING":
-        return 0, 255, 255
-    if status == "NO FACE":
-        return 160, 160, 160
-    return 0, 255, 0
-
-
-def format_optional(value: float | None, precision: int = 3) -> str:
-    if value is None or not np.isfinite(value):
-        return "--"
-    return f"{value:.{precision}f}"
 
 
 def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
@@ -151,6 +185,7 @@ def main() -> int:
     monitor = EyeClosureMonitor(
         calibration_seconds=args.calibration_seconds,
         closed_ratio=args.closed_ratio,
+        reopen_ratio=args.reopen_ratio,
         danger_seconds=args.danger_seconds,
     )
     # [PERCLOS] 모니터 생성
@@ -211,14 +246,14 @@ def main() -> int:
 
             now = time.monotonic()
             inference_started_at = time.perf_counter()
-            detection = face_detector.detect_largest(frame)
-            mean_ear = None
-            right_ear = None
-            left_ear = None
 
+            # AI 모델 추론: YuNet + 얼굴이 검출된 경우 PFLD
+            detection = face_detector.detect_largest(frame)
+
+            landmarks = None
             if detection is not None:
                 try:
-                    landmarks, crop_box = landmark_detector.detect(
+                    landmarks, _crop_box = landmark_detector.detect(
                         frame,
                         detection.box,
                     )
@@ -226,11 +261,24 @@ def main() -> int:
                     print(f"[ERROR] Landmark inference failed: {error}")
                     break
 
-                mean_ear, right_ear, left_ear = (
-                    mean_eye_aspect_ratio(landmarks)
+            # 얼굴이 없어도 YuNet 추론 시간은 기록한다.
+            inference_ms = (
+                time.perf_counter() - inference_started_at
+            ) * 1000.0
+
+            # 추론 시간에 포함하지 않는 후처리
+            detection_score = (
+                None if detection is None else detection.score
+            )
+            mean_ear = None
+            right_ear = None
+            left_ear = None
+
+            if landmarks is not None:
+                mean_ear, right_ear, left_ear = mean_eye_aspect_ratio(
+                    landmarks
                 )
 
-                # 눈 6점씩(양쪽 12점) + 입 상하좌우 4점 표시
                 draw_points(
                     frame, landmarks[list(RIGHT_EYE_INDICES)], (0, 255, 0)
                 )
@@ -250,9 +298,6 @@ def main() -> int:
                     2,
                 )
 
-            inference_ms = (
-                time.perf_counter() - inference_started_at
-            ) * 1000.0
             eye_state = monitor.update(mean_ear, timestamp=now)
             # [PERCLOS] 눈 감김 판정을 PERCLOS에 연결
             perclos_state = perclos_monitor.update(
@@ -260,62 +305,15 @@ def main() -> int:
                 valid_face=eye_state.valid_face,
                 timestamp=now,
             )
-            color = state_color(eye_state.status)
-
-            if eye_state.ear is None:
-                draw_text(frame, "EAR: --", 0)
-            else:
-                draw_text(frame, f"EAR: {eye_state.ear:.3f}", 0)
-                draw_text(
-                    frame,
-                    f"R: {right_ear:.3f}  L: {left_ear:.3f}",
-                    1,
-                )
-
-            if not eye_state.calibrated:
-                percent = int(eye_state.calibration_progress * 100)
-                draw_text(
-                    frame,
-                    f"CALIBRATION: {percent}% - KEEP EYES OPEN",
-                    2,
-                    color,
-                )
-            else:
-                draw_text(
-                    frame,
-                    "BASE: "
-                    f"{format_optional(eye_state.baseline_ear)}  "
-                    "REL: "
-                    f"{format_optional(eye_state.relative_ear, 2)}",
-                    2,
-                )
-                draw_text(
-                    frame,
-                    f"CLOSED: {eye_state.closed_seconds:.2f}s",
-                    3,
-                    color,
-                )
-
-            draw_text(frame, f"STATE: {eye_state.status}", 4, color)
-            # [PERCLOS] 화면 표시 (경고 수준이면 색 강조)
-            if eye_state.calibrated:
-                if perclos_state.is_warning:
-                    perclos_color = (0, 0, 255)
-                elif perclos_state.is_caution:
-                    perclos_color = (0, 255, 255)
-                else:
-                    perclos_color = (255, 255, 255)
-                draw_text(
-                    frame,
-                    f"PERCLOS: {perclos_state.perclos:.2f}",
-                    5,
-                    perclos_color,
-                )
-                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 6)
-                draw_text(frame, "q: quit  r: recalibrate", 7)
-            else:
-                draw_text(frame, f"FPS: {logger.current_fps:.1f}", 5)
-                draw_text(frame, "q: quit  r: recalibrate", 6)
+            draw_status_overlay(
+                frame,
+                eye_state,
+                perclos_state,
+                right_ear=right_ear,
+                left_ear=left_ear,
+                detection_score=detection_score,
+                fps=logger.current_fps,
+            )
 
             video_writer.write(frame)
             cv2.imshow("ZZM EAR Eye Monitor", frame)
@@ -328,12 +326,14 @@ def main() -> int:
                 inference_ms=inference_ms,
                 face_count=0 if detection is None else 1,
                 extra_metrics={
+                    "detection_score": detection_score,
                     "ear": eye_state.ear,
                     "right_ear": right_ear,
                     "left_ear": left_ear,
                     "baseline_ear": eye_state.baseline_ear,
                     "relative_ear": eye_state.relative_ear,
                     "closed_threshold": eye_state.closed_threshold,
+                    "reopen_threshold": eye_state.reopen_threshold,
                     "is_eye_closed": eye_state.is_closed,
                     "closed_seconds": eye_state.closed_seconds,
                     "eye_state": eye_state.status,

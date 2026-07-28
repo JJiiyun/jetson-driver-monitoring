@@ -101,6 +101,60 @@ class EyeClosureMonitorTest(unittest.TestCase):
         self.assertIsNone(missing_face.relative_ear)
         self.assertEqual(missing_face.closed_seconds, 0.0)
 
+    def test_hysteresis_prevents_state_flapping(self) -> None:
+        monitor = EyeClosureMonitor(
+            calibration_seconds=1.0,
+            closed_ratio=0.70,
+            reopen_ratio=0.80,
+            danger_seconds=2.0,
+            min_calibration_samples=2,
+        )
+        monitor.update(0.30, timestamp=0.0)
+        monitor.update(0.30, timestamp=1.0)
+
+        closed = monitor.update(0.20, timestamp=2.0)
+        self.assertEqual(closed.status, "EYES CLOSED")
+
+        between_thresholds = monitor.update(0.22, timestamp=2.1)
+        self.assertEqual(between_thresholds.status, "EYES CLOSED")
+        self.assertTrue(between_thresholds.is_closed)
+
+        reopened = monitor.update(0.24, timestamp=2.2)
+        self.assertEqual(reopened.status, "NORMAL")
+        self.assertFalse(reopened.is_closed)
+        self.assertAlmostEqual(reopened.closed_threshold, 0.21)
+        self.assertAlmostEqual(reopened.reopen_threshold, 0.24)
+
+        still_open = monitor.update(0.22, timestamp=2.3)
+        self.assertEqual(still_open.status, "NORMAL")
+        self.assertFalse(still_open.is_closed)
+
+    def test_reopen_ratio_must_exceed_closed_ratio(self) -> None:
+        with self.assertRaises(ValueError):
+            EyeClosureMonitor(closed_ratio=0.7, reopen_ratio=0.7)
+
+    def test_basic_mode_uses_one_threshold_without_hysteresis(self) -> None:
+        monitor = EyeClosureMonitor(
+            calibration_seconds=1.0,
+            closed_ratio=0.70,
+            reopen_ratio=0.70,
+            use_hysteresis=False,
+            min_calibration_samples=2,
+        )
+        monitor.update(0.30, timestamp=0.0)
+        monitor.update(0.30, timestamp=1.0)
+
+        self.assertEqual(
+            monitor.update(0.20, timestamp=2.0).status,
+            "EYES CLOSED",
+        )
+        reopened = monitor.update(0.22, timestamp=2.1)
+        self.assertEqual(reopened.status, "NORMAL")
+        self.assertAlmostEqual(
+            reopened.closed_threshold,
+            reopened.reopen_threshold,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
