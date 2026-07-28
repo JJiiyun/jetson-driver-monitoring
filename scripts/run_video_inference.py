@@ -34,6 +34,7 @@ from drowsiness.detectors import (
 )
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor
+from drowsiness.qt_dashboard import create_qt_application, create_risk_dashboard
 # === [하품 추가 1] YawnMonitor import ===
 # 하품 검출 모듈. drowsiness/yawn_monitor.py 에 위치.
 from drowsiness.yawn_monitor import YawnMonitor
@@ -158,6 +159,11 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         action="store_true",
         help="LOW 신호에서 켜지는 부저 모듈 사용",
     )
+    parser.add_argument(
+        "--qt-dashboard",
+        action="store_true",
+        help="추론 중 Qt 위험 대시보드 표시",
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -277,6 +283,14 @@ def main(use_fsm: bool = False) -> int:
         )
         risk_controller = DrowsinessRiskController()
         risk_publisher = RiskEventPublisher()
+        qt_app = None
+        dashboard = None
+        if args.qt_dashboard:
+            qt_app = create_qt_application(sys.argv)
+            dashboard = create_risk_dashboard(
+                risk_controller, risk_publisher
+            )
+            dashboard.show()
     except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         capture.release()
         print(f"[ERROR] {error}")
@@ -455,6 +469,10 @@ def main(use_fsm: bool = False) -> int:
                 valid_face=eye_state.valid_face,
             )
             risk_publisher.publish(risk_decision)
+            if qt_app is not None:
+                qt_app.processEvents()
+                if dashboard is not None and not dashboard.isVisible():
+                    break
             draw_status_overlay(
                 frame,
                 eye_state,
@@ -535,6 +553,8 @@ def main(use_fsm: bool = False) -> int:
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        if dashboard is not None:
+            dashboard.close()
         if buzzer_actuator is not None:
             buzzer_actuator.close()
         writer.release()

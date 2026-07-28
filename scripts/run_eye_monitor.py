@@ -34,6 +34,7 @@ from drowsiness.detectors import (
 )
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
+from drowsiness.qt_dashboard import create_qt_application, create_risk_dashboard
 from drowsiness.yawn_monitor import YawnMonitor
 from benchmark import PerformanceLogger
 
@@ -176,6 +177,11 @@ def parse_args() -> argparse.Namespace:
         "--buzzer-active-low", action="store_true",
         help="Use a buzzer module that turns on with a LOW signal",
     )
+    parser.add_argument(
+        "--qt-dashboard",
+        action="store_true",
+        help="Show the Qt risk dashboard alongside the camera view",
+    )
     parser.add_argument("--warmup-frames", type=nonnegative_int, default=30)
     parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
     parser.add_argument("--video-codec", default="MJPG")
@@ -265,6 +271,18 @@ def main() -> int:
     )
     risk_controller = DrowsinessRiskController()
     risk_publisher = RiskEventPublisher()
+    qt_app = None
+    dashboard = None
+    if args.qt_dashboard:
+        try:
+            qt_app = create_qt_application(sys.argv)
+            dashboard = create_risk_dashboard(
+                risk_controller, risk_publisher
+            )
+            dashboard.show()
+        except RuntimeError as error:
+            print(f"[ERROR] {error}")
+            return 1
     cap = open_camera(args)
     if not cap.isOpened():
         print(f"[ERROR] Cannot open camera index {args.camera}.")
@@ -415,6 +433,10 @@ def main() -> int:
                 valid_face=eye_state.valid_face,
             )
             risk_publisher.publish(risk_decision)
+            if qt_app is not None:
+                qt_app.processEvents()
+                if dashboard is not None and not dashboard.isVisible():
+                    break
             draw_status_overlay(
                 frame,
                 eye_state,
@@ -485,6 +507,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        if dashboard is not None:
+            dashboard.close()
         if buzzer_actuator is not None:
             buzzer_actuator.close()
         video_writer.release()
