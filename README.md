@@ -25,7 +25,7 @@ bash scripts/setup_env.sh
 source zzmvenv/bin/activate
 ```
 
-## PFLD TensorRT FP16
+## PFLD inference backends
 
 Generate the device-specific engine on the Jetson Nano:
 
@@ -33,21 +33,27 @@ Generate the device-specific engine on the Jetson Nano:
 bash scripts/build_pfld_fp16_engine.sh
 ```
 
-Run camera inference with the TensorRT PFLD backend:
+Choose OpenCV FP32, TensorRT FP32, or TensorRT FP16 explicitly:
 
 ```bash
-python3 scripts/run_eye_monitor.py --landmark-backend tensorrt
+python3 scripts/run_eye_monitor.py --landmark-backend opencv-fp32
+python3 scripts/run_eye_monitor.py --landmark-backend tensorrt-fp32
+python3 scripts/run_eye_monitor.py --landmark-backend tensorrt-fp16
 ```
 
-Run video inference with the same backend:
+The same choices work for video inference and the Qt dashboard:
 
 ```bash
-python3 scripts/run_video_inference.py INPUT.mp4 \
-  --landmark-backend tensorrt
+python3 scripts/run_video_inference_FSM.py INPUT.mp4 \
+  --landmark-backend tensorrt-fp16 \
+  --qt-dashboard
 ```
 
-OpenCV remains the default backend. TensorRT uses
-`models/engines/fp16/pfld_fp16.engine` unless `--pfld-engine` is supplied.
+OpenCV FP32 remains the default. TensorRT FP32 automatically uses
+`models/engines/fp32/pfld_fp32.engine`, while TensorRT FP16 uses
+`models/engines/fp16/pfld_fp16.engine`. `--pfld-engine` overrides the
+automatically selected path. The old `opencv` and `tensorrt` names remain
+compatible aliases for `opencv-fp32` and `tensorrt-fp16`.
 
 ## OpenCV CUDA experiment
 
@@ -56,6 +62,13 @@ runs both YuNet and ONNX PFLD with the OpenCV CUDA FP32 target.
 
 ```bash
 bash scripts/run_experiment.sh data/final_test_640x360.mp4
+```
+
+Select another backend or enable the Qt dashboard with environment variables:
+
+```bash
+LANDMARK_BACKEND=tensorrt-fp32 QT_DASHBOARD=1 \
+  bash scripts/run_experiment.sh data/final_test_640x360.mp4
 ```
 
 ## Camer Test

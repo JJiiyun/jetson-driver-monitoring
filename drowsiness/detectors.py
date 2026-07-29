@@ -66,6 +66,151 @@ class YuNetFaceDetector:
         )
 
 
+class TensorRTYuNetFaceDetector:
+    """YuNet TensorRT inference with OpenCV-compatible decode and NMS."""
+
+    STRIDES = (8, 16, 32)
+
+    def __init__(
+        self,
+        engine_path: str | Path,
+        input_size: tuple[int, int] = (640, 640),
+        score_threshold: float = 0.8,
+        nms_threshold: float = 0.3,
+        top_k: int = 5000,
+    ) -> None:
+        path = Path(engine_path)
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(f"YuNet TensorRT engine not found: {path}")
+        try:
+            import pycuda.autoinit  # noqa: F401
+            import pycuda.driver as cuda
+            import tensorrt as trt
+        except Exception as error:
+            raise RuntimeError("Could not initialize TensorRT/PyCUDA for YuNet.") from error
+
+        self._cuda = cuda
+        self._trt = trt
+        self._score_threshold = float(score_threshold)
+        self._nms_threshold = float(nms_threshold)
+        self._top_k = int(top_k)
+        self._runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        self._engine = self._runtime.deserialize_cuda_engine(path.read_bytes())
+        if self._engine is None:
+            raise RuntimeError(f"Could not deserialize YuNet engine: {path}")
+        self._context = self._engine.create_execution_context()
+        self._input_index = next(
+            i for i in range(self._engine.num_bindings)
+            if self._engine.binding_is_input(i)
+        )
+        input_shape = tuple(self._engine.get_binding_shape(self._input_index))
+        expected = (1, 3, input_size[1], input_size[0])
+        if input_shape != expected:
+            raise RuntimeError(f"Expected YuNet input {expected}, got {input_shape}.")
+        self._input_size = input_size
+        self._bindings = [0] * self._engine.num_bindings
+        self._hosts: dict[str, np.ndarray] = {}
+        self._devices: dict[str, object] = {}
+        for index in range(self._engine.num_bindings):
+            shape = tuple(self._engine.get_binding_shape(index))
+            dtype = self._numpy_dtype(self._engine.get_binding_dtype(index))
+            host = cuda.pagelocked_empty(int(np.prod(shape)), dtype)
+            device = cuda.mem_alloc(host.nbytes)
+            self._bindings[index] = int(device)
+            name = self._engine.get_binding_name(index)
+            self._hosts[name] = host
+            self._devices[name] = device
+        self._stream = cuda.Stream()
+
+    def _numpy_dtype(self, tensor_dtype: object) -> np.dtype:
+        trt = self._trt
+        mapping = {
+            trt.DataType.FLOAT: np.dtype(np.float32),
+            trt.DataType.HALF: np.dtype(np.float16),
+            trt.DataType.INT8: np.dtype(np.int8),
+            trt.DataType.INT32: np.dtype(np.int32),
+            trt.DataType.BOOL: np.dtype(np.bool_),
+        }
+        return mapping[tensor_dtype]
+
+    def detect_largest(self, frame: np.ndarray) -> FaceDetection | None:
+        frame_height, frame_width = frame.shape[:2]
+        input_width, input_height = self._input_size
+        scale = min(input_width / frame_width, input_height / frame_height)
+        resized_width = max(1, int(round(frame_width * scale)))
+        resized_height = max(1, int(round(frame_height * scale)))
+        resized = cv2.resize(frame, (resized_width, resized_height))
+        canvas = np.zeros((input_height, input_width, 3), dtype=np.uint8)
+        canvas[:resized_height, :resized_width] = resized
+        blob = cv2.dnn.blobFromImage(canvas, scalefactor=1.0)
+        np.copyto(self._hosts["input"], blob.reshape(-1), casting="no")
+        self._cuda.memcpy_htod_async(
+            self._devices["input"], self._hosts["input"], self._stream
+        )
+        if not self._context.execute_async_v2(self._bindings, self._stream.handle):
+            raise RuntimeError("TensorRT YuNet inference failed.")
+        for name, host in self._hosts.items():
+            if name != "input":
+                self._cuda.memcpy_dtoh_async(
+                    host, self._devices[name], self._stream
+                )
+        self._stream.synchronize()
+        return self._decode(frame_width, frame_height, scale)
+
+    def _decode(
+        self, frame_width: int, frame_height: int, scale: float
+    ) -> FaceDetection | None:
+        boxes: list[list[float]] = []
+        scores: list[float] = []
+        for stride in self.STRIDES:
+            cls = self._hosts[f"cls_{stride}"].reshape(-1)
+            obj = self._hosts[f"obj_{stride}"].reshape(-1)
+            bbox = self._hosts[f"bbox_{stride}"].reshape(-1, 4)
+            columns = self._input_size[0] // stride
+            candidate_indices = np.flatnonzero(
+                np.sqrt(np.maximum(0.0, cls * obj)) >= self._score_threshold
+            )
+            for index in candidate_indices:
+                score = float(np.sqrt(max(0.0, cls[index] * obj[index])))
+                row, column = divmod(int(index), columns)
+                center_x = (column + bbox[index, 0]) * stride / scale
+                center_y = (row + bbox[index, 1]) * stride / scale
+                width = np.exp(bbox[index, 2]) * stride / scale
+                height = np.exp(bbox[index, 3]) * stride / scale
+                boxes.append([
+                    center_x - width / 2,
+                    center_y - height / 2,
+                    width,
+                    height,
+                ])
+                scores.append(score)
+        if not boxes:
+            return None
+        order = np.argsort(scores)[::-1][: self._top_k]
+        selected_boxes = [boxes[i] for i in order]
+        selected_scores = [scores[i] for i in order]
+        kept = cv2.dnn.NMSBoxes(
+            selected_boxes,
+            selected_scores,
+            self._score_threshold,
+            self._nms_threshold,
+        )
+        if len(kept) == 0:
+            return None
+        candidates: list[FaceDetection] = []
+        for kept_index in np.asarray(kept).reshape(-1):
+            x, y, width, height = selected_boxes[int(kept_index)]
+            x1 = max(0, min(frame_width - 1, int(round(x))))
+            y1 = max(0, min(frame_height - 1, int(round(y))))
+            x2 = max(x1 + 1, min(frame_width, int(round(x + width))))
+            y2 = max(y1 + 1, min(frame_height, int(round(y + height))))
+            candidates.append(FaceDetection(
+                box=(x1, y1, x2 - x1, y2 - y1),
+                score=selected_scores[int(kept_index)],
+            ))
+        return max(candidates, key=lambda item: item.box[2] * item.box[3])
+
+
 class PFLDLandmarkDetector:
     def __init__(
         self,
@@ -218,8 +363,12 @@ class PFLDTensorRTDetector:
                 f"got {input_shape}."
             )
 
-        input_dtype = trt.nptype(engine.get_binding_dtype(self._input_index))
-        output_dtype = trt.nptype(engine.get_binding_dtype(self._output_index))
+        input_dtype = self._numpy_dtype(
+            engine.get_binding_dtype(self._input_index)
+        )
+        output_dtype = self._numpy_dtype(
+            engine.get_binding_dtype(self._output_index)
+        )
         input_count = int(np.prod(input_shape))
         output_count = int(np.prod(output_shape))
         if output_count != 136:
@@ -236,6 +385,23 @@ class PFLDTensorRTDetector:
         self._bindings[self._input_index] = int(self._device_input)
         self._bindings[self._output_index] = int(self._device_output)
         self._stream = cuda.Stream()
+
+    def _numpy_dtype(self, tensor_dtype: object) -> np.dtype:
+        """Map TensorRT 8 types without its NumPy 1.24-incompatible helper."""
+        trt = self._trt
+        dtype_map = {
+            trt.DataType.FLOAT: np.dtype(np.float32),
+            trt.DataType.HALF: np.dtype(np.float16),
+            trt.DataType.INT8: np.dtype(np.int8),
+            trt.DataType.INT32: np.dtype(np.int32),
+            trt.DataType.BOOL: np.dtype(np.bool_),
+        }
+        try:
+            return dtype_map[tensor_dtype]
+        except KeyError as error:
+            raise RuntimeError(
+                f"Unsupported TensorRT binding data type: {tensor_dtype}."
+            ) from error
 
     def detect(
         self,
