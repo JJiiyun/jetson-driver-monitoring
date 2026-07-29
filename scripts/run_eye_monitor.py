@@ -30,6 +30,7 @@ from drowsiness.actions import (
 from drowsiness.detectors import (
     PFLDLandmarkDetector,
     PFLDTensorRTDetector,
+    TensorRTYuNetFaceDetector,
     YuNetFaceDetector,
 )
 from drowsiness.overlay import draw_status_overlay
@@ -40,9 +41,13 @@ from benchmark import PerformanceLogger
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
+DEFAULT_YUNET_FP16_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp16/yunet_fp16.engine"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
-DEFAULT_PFLD_ENGINE_PATH = (
+DEFAULT_PFLD_FP16_ENGINE_PATH = (
     PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
+)
+DEFAULT_PFLD_FP32_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp32/pfld_fp32.engine"
 )
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
@@ -73,6 +78,32 @@ EYE_FRAME_FIELDS = [
     "hazard_light",
     "stop_request",
 ]
+
+
+LANDMARK_BACKEND_ALIASES = {
+    "opencv": "opencv-fp32",
+    "tensorrt": "tensorrt-fp16",
+}
+
+
+def landmark_backend(value: str) -> str:
+    normalized = LANDMARK_BACKEND_ALIASES.get(value, value)
+    valid = ("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16")
+    if normalized not in valid:
+        raise argparse.ArgumentTypeError(
+            "must be opencv-fp32, tensorrt-fp32, or tensorrt-fp16"
+        )
+    return normalized
+
+
+def selected_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.landmark_backend.startswith("tensorrt-"):
+        return None
+    if args.pfld_engine is not None:
+        return args.pfld_engine
+    if args.landmark_backend == "tensorrt-fp32":
+        return DEFAULT_PFLD_FP32_ENGINE_PATH
+    return DEFAULT_PFLD_FP16_ENGINE_PATH
 
 
 def positive_int(value: str) -> int:
@@ -125,6 +156,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=positive_int, default=480)
     parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
+    parser.add_argument(
+        "--face-backend", choices=("opencv-fp32", "tensorrt-fp16"),
+        default="opencv-fp32",
+    )
+    parser.add_argument(
+        "--yunet-engine", type=Path, default=DEFAULT_YUNET_FP16_ENGINE_PATH
+    )
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
         "--opencv-device",
@@ -134,12 +172,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--landmark-backend",
-        choices=("opencv", "tensorrt"),
-        default="opencv",
-        help="PFLD inference backend (default: opencv)",
+        type=landmark_backend,
+        default="opencv-fp32",
+        metavar="{opencv-fp32,tensorrt-fp32,tensorrt-fp16}",
+        help="PFLD inference backend and precision (default: opencv-fp32)",
     )
     parser.add_argument(
-        "--pfld-engine", type=Path, default=DEFAULT_PFLD_ENGINE_PATH
+        "--pfld-engine",
+        type=Path,
+        default=None,
+        help="Override the FP32/FP16 TensorRT engine selected by the backend",
     )
     parser.add_argument(
         "--calibration-seconds", type=positive_float, default=3.0
@@ -236,19 +278,22 @@ def main() -> int:
         return 1
 
     try:
-        face_detector = YuNetFaceDetector(
-            args.yunet,
-            input_size=(args.width, args.height),
-            device=args.opencv_device,
-        )
-        landmark_detector = (
-            PFLDTensorRTDetector(args.pfld_engine)
-            if args.landmark_backend == "tensorrt"
-            else PFLDLandmarkDetector(
-                args.pfld, device=args.opencv_device
+        face_detector = (
+            TensorRTYuNetFaceDetector(args.yunet_engine)
+            if args.face_backend == "tensorrt-fp16"
+            else YuNetFaceDetector(
+                args.yunet,
+                input_size=(args.width, args.height),
+                device=args.opencv_device,
             )
         )
-    except (FileNotFoundError, RuntimeError, cv2.error) as error:
+        engine_path = selected_engine_path(args)
+        landmark_detector = (
+            PFLDTensorRTDetector(engine_path)
+            if engine_path is not None
+            else PFLDLandmarkDetector(args.pfld, device=args.opencv_device)
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         print(f"[ERROR] {error}")
         return 1
 
@@ -295,9 +340,12 @@ def main() -> int:
 
     logger = PerformanceLogger(
         backend=(
-            f"opencv_{args.opencv_device}_yunet_pfld_tensorrt_fp16"
-            if args.landmark_backend == "tensorrt"
-            else f"opencv_{args.opencv_device}_yunet_pfld_fp32"
+            f"{args.face_backend.replace('-', '_')}_yunet_pfld_"
+            + (
+                "fp32"
+                if args.landmark_backend == "opencv-fp32"
+                else args.landmark_backend.replace("-", "_")
+            )
         ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
@@ -337,6 +385,10 @@ def main() -> int:
             return 1
 
     print("Keep both eyes naturally open during the first 3 seconds.")
+    print(f"Landmark backend: {args.landmark_backend}")
+    print(f"Face backend: {args.face_backend}")
+    if engine_path is not None:
+        print(f"TensorRT engine: {engine_path}")
     print("Press r to recalibrate, a to acknowledge, q to quit.")
     print(f"Video: {video_path}")
 
@@ -445,6 +497,9 @@ def main() -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+                face_box=(
+                    None if detection is None else detection.box
+                ),
             )
             cv2.putText(
                 frame,

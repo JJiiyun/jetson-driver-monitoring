@@ -19,16 +19,23 @@ DANGER="${4:-1.7}"
 YAWN_OPEN="0.18"
 YAWN_CLOSE="0.14"
 YAWN_SECONDS="0.3"
+LANDMARK_BACKEND="${LANDMARK_BACKEND:-opencv-fp32}"
+FACE_BACKEND="${FACE_BACKEND:-opencv-fp32}"
+QT_DASHBOARD="${QT_DASHBOARD:-0}"
 BUZZER_PIN="${BUZZER_PIN:-}"
 GPIO_NUMBERING="${GPIO_NUMBERING:-BOARD}"
 BUZZER_ACTIVE_LOW="${BUZZER_ACTIVE_LOW:-0}"
 
 BUZZER_ARGS=()
+DISPLAY_ARGS=()
 if [ -n "$BUZZER_PIN" ]; then
     BUZZER_ARGS+=(--buzzer-pin "$BUZZER_PIN" --gpio-numbering "$GPIO_NUMBERING")
     if [ "$BUZZER_ACTIVE_LOW" = "1" ]; then
         BUZZER_ARGS+=(--buzzer-active-low)
     fi
+fi
+if [ "$QT_DASHBOARD" = "1" ]; then
+    DISPLAY_ARGS+=(--qt-dashboard)
 fi
 
 if [ -z "$VIDEO" ] || [ ! -f "$VIDEO" ]; then
@@ -66,7 +73,8 @@ echo "실험 시작: $(date)"
 echo "  영상: $VIDEO (해상도 $RES)"
 echo "  파라미터: closed=$CLOSED reopen=$REOPEN danger=$DANGER"
 echo "  하품 파라미터: open=$YAWN_OPEN close=$YAWN_CLOSE duration=$YAWN_SECONDS"
-echo "  추론 환경: OpenCV CUDA FP32 (YuNet + PFLD)"
+echo "  랜드마크 백엔드: $LANDMARK_BACKEND"
+echo "  얼굴 백엔드: $FACE_BACKEND"
 echo "=========================================="
 
 # 1) 추론
@@ -74,7 +82,8 @@ echo ""
 echo "[1/3] 추론 실행 중..."
 cd "$SCRIPTS"
 python3 run_video_inference_FSM.py "$VIDEO" \
-    --landmark-backend opencv \
+    --landmark-backend "$LANDMARK_BACKEND" \
+    --face-backend "$FACE_BACKEND" \
     --opencv-device cuda \
     --closed-ratio "$CLOSED" \
     --reopen-ratio "$REOPEN" \
@@ -82,7 +91,8 @@ python3 run_video_inference_FSM.py "$VIDEO" \
     --yawn-open-ratio "$YAWN_OPEN" \
     --yawn-close-ratio "$YAWN_CLOSE" \
     --yawn-seconds "$YAWN_SECONDS" \
-    "${BUZZER_ARGS[@]}"
+    "${BUZZER_ARGS[@]}" \
+    "${DISPLAY_ARGS[@]}"
 
 # 2) 방금 생성된 최신 frames/summary 자동 탐지
 FRAMES=$(ls -t "$RESULTS"/*_frames.csv | head -1)

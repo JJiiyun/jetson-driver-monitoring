@@ -30,6 +30,7 @@ from drowsiness.actions import (
 from drowsiness.detectors import (
     PFLDLandmarkDetector,
     PFLDTensorRTDetector,
+    TensorRTYuNetFaceDetector,
     YuNetFaceDetector,
 )
 from drowsiness.overlay import draw_status_overlay
@@ -41,9 +42,13 @@ from drowsiness.yawn_monitor import YawnMonitor
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
+DEFAULT_YUNET_FP16_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp16/yunet_fp16.engine"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
-DEFAULT_PFLD_ENGINE_PATH = (
+DEFAULT_PFLD_FP16_ENGINE_PATH = (
     PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
+)
+DEFAULT_PFLD_FP32_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp32/pfld_fp32.engine"
 )
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_OUTPUT_DIR = PROJECT_ROOT / "outputs/video_inference"
@@ -81,6 +86,32 @@ FRAME_FIELDS = [
 ]
 
 
+LANDMARK_BACKEND_ALIASES = {
+    "opencv": "opencv-fp32",
+    "tensorrt": "tensorrt-fp16",
+}
+
+
+def landmark_backend(value: str) -> str:
+    normalized = LANDMARK_BACKEND_ALIASES.get(value, value)
+    valid = ("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16")
+    if normalized not in valid:
+        raise argparse.ArgumentTypeError(
+            "must be opencv-fp32, tensorrt-fp32, or tensorrt-fp16"
+        )
+    return normalized
+
+
+def selected_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.landmark_backend.startswith("tensorrt-"):
+        return None
+    if args.pfld_engine is not None:
+        return args.pfld_engine
+    if args.landmark_backend == "tensorrt-fp32":
+        return DEFAULT_PFLD_FP32_ENGINE_PATH
+    return DEFAULT_PFLD_FP16_ENGINE_PATH
+
+
 def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     mode = "FSM with hysteresis" if use_fsm else "single EAR threshold"
     parser = argparse.ArgumentParser(
@@ -102,6 +133,13 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         help="처리 중 결과 화면 표시",
     )
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
+    parser.add_argument(
+        "--face-backend", choices=("opencv-fp32", "tensorrt-fp16"),
+        default="opencv-fp32",
+    )
+    parser.add_argument(
+        "--yunet-engine", type=Path, default=DEFAULT_YUNET_FP16_ENGINE_PATH
+    )
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
         "--opencv-device",
@@ -111,12 +149,16 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     )
     parser.add_argument(
         "--landmark-backend",
-        choices=("opencv", "tensorrt"),
-        default="opencv",
-        help="PFLD inference backend (default: opencv)",
+        type=landmark_backend,
+        default="opencv-fp32",
+        metavar="{opencv-fp32,tensorrt-fp32,tensorrt-fp16}",
+        help="PFLD inference backend and precision (default: opencv-fp32)",
     )
     parser.add_argument(
-        "--pfld-engine", type=Path, default=DEFAULT_PFLD_ENGINE_PATH
+        "--pfld-engine",
+        type=Path,
+        default=None,
+        help="Override the FP32/FP16 TensorRT engine selected by the backend",
     )
     parser.add_argument("--calibration-seconds", type=float, default=3.0)
     parser.add_argument("--closed-ratio", type=float, default=0.70)
@@ -246,17 +288,18 @@ def main(use_fsm: bool = False) -> int:
         return 1
 
     try:
-        face_detector = YuNetFaceDetector(
-            args.yunet,
-            input_size=(width, height),
-            device=args.opencv_device,
-        )
-        landmark_detector = (
-            PFLDTensorRTDetector(args.pfld_engine)
-            if args.landmark_backend == "tensorrt"
-            else PFLDLandmarkDetector(
-                args.pfld, device=args.opencv_device
+        face_detector = (
+            TensorRTYuNetFaceDetector(args.yunet_engine)
+            if args.face_backend == "tensorrt-fp16"
+            else YuNetFaceDetector(
+                args.yunet, input_size=(width, height), device=args.opencv_device
             )
+        )
+        engine_path = selected_engine_path(args)
+        landmark_detector = (
+            PFLDTensorRTDetector(engine_path)
+            if engine_path is not None
+            else PFLDLandmarkDetector(args.pfld, device=args.opencv_device)
         )
         eye_monitor = EyeClosureMonitor(
             calibration_seconds=args.calibration_seconds,
@@ -297,13 +340,13 @@ def main(use_fsm: bool = False) -> int:
         return 1
 
     landmark_backend_name = (
-        "tensorrt_fp16"
-        if args.landmark_backend == "tensorrt"
-        else "fp32"
+        "fp32"
+        if args.landmark_backend == "opencv-fp32"
+        else args.landmark_backend.replace("-", "_")
     )
     logger = PerformanceLogger(
         backend=(
-            f"opencv_{args.opencv_device}_yunet_pfld_{landmark_backend_name}"
+            f"{args.face_backend.replace('-', '_')}_yunet_pfld_{landmark_backend_name}"
             f"_video_{'fsm' if use_fsm else 'basic'}"
         ),
         output_dir=RESULTS_DIR,
@@ -348,6 +391,10 @@ def main(use_fsm: bool = False) -> int:
 
     print(f"Input: {args.input}")
     print(f"Output: {output_path}")
+    print(f"Landmark backend: {args.landmark_backend}")
+    print(f"Face backend: {args.face_backend}")
+    if engine_path is not None:
+        print(f"TensorRT engine: {engine_path}")
     print(
         "Mode: "
         + (
@@ -481,6 +528,9 @@ def main(use_fsm: bool = False) -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+                face_box=(
+                    None if detection is None else detection.box
+                ),
             )
             cv2.putText(
                 frame,
