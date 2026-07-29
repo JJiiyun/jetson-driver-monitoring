@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import math
 import re
+import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,10 +105,12 @@ class PerformanceLogger:
         "capture_mean_ms",
         "capture_p95_ms",
         "inference_mean_ms",
+        "inference_median_ms",
         "inference_p95_ms",
         "processing_mean_ms",
         "processing_p95_ms",
         "frame_time_mean_ms",
+        "frame_time_median_ms",
         "frame_time_p95_ms",
         "average_face_count",
         "started_at",
@@ -248,10 +251,16 @@ class PerformanceLogger:
             "capture_mean_ms": _mean(capture),
             "capture_p95_ms": _percentile(capture, 0.95),
             "inference_mean_ms": _mean(inference),
+            "inference_median_ms": (
+                statistics.median(inference) if inference else None
+            ),
             "inference_p95_ms": _percentile(inference, 0.95),
             "processing_mean_ms": _mean(processing),
             "processing_p95_ms": _percentile(processing, 0.95),
             "frame_time_mean_ms": _mean(frame_time),
+            "frame_time_median_ms": (
+                statistics.median(frame_time) if frame_time else None
+            ),
             "frame_time_p95_ms": _percentile(frame_time, 0.95),
             "average_face_count": _mean(face_counts),
             "started_at": self.started_at,
@@ -260,7 +269,10 @@ class PerformanceLogger:
             .isoformat(timespec="milliseconds"),
         }
 
-    def write_csv(self) -> Dict[str, object]:
+    def write_csv(
+        self,
+        extra_summary_metrics: Optional[Mapping[str, object]] = None,
+    ) -> Dict[str, object]:
         """Write frame-level and run-summary CSV files, then return summary."""
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -285,12 +297,25 @@ class PerformanceLogger:
                 writer.writerow({**common, **asdict(frame), **extras})
 
         summary = self.summary()
+        summary_extras = dict(extra_summary_metrics or {})
+        duplicate_summary_fields = set(summary_extras) & set(
+            self.SUMMARY_FIELDS
+        )
+        if duplicate_summary_fields:
+            raise ValueError(
+                "Extra summary fields duplicate built-in fields: "
+                f"{sorted(duplicate_summary_fields)}"
+            )
+        summary.update(summary_extras)
         with self.summary_csv_path.open(
             "w",
             newline="",
             encoding="utf-8",
         ) as csv_file:
-            writer = csv.DictWriter(csv_file, fieldnames=self.SUMMARY_FIELDS)
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=self.SUMMARY_FIELDS + list(summary_extras),
+            )
             writer.writeheader()
             writer.writerow(summary)
 
@@ -313,10 +338,12 @@ class PerformanceLogger:
         print(
             "Inference latency: "
             f"mean {display('inference_mean_ms', ' ms')}, "
+            f"median {display('inference_median_ms', ' ms')}, "
             f"P95 {display('inference_p95_ms', ' ms')}"
         )
         print(
             "Frame latency: "
             f"mean {display('frame_time_mean_ms', ' ms')}, "
+            f"median {display('frame_time_median_ms', ' ms')}, "
             f"P95 {display('frame_time_p95_ms', ' ms')}"
         )

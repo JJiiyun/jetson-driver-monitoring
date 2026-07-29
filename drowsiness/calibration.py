@@ -37,10 +37,10 @@ class EyeClosureMonitor:
     def __init__(
         self,
         calibration_seconds: float = 3.0,
-        closed_ratio: float = 0.70,
-        reopen_ratio: float = 0.80,
+        closed_ratio: float = 0.72,
+        reopen_ratio: float = 0.85,
         use_hysteresis: bool = True,
-        danger_seconds: float = 2.0,
+        danger_seconds: float = 1.7,
         min_calibration_samples: int = 15,
     ) -> None:
         if calibration_seconds <= 0:

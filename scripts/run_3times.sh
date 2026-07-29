@@ -19,14 +19,14 @@ cd "$SCRIPTS"
 echo "=========================================="
 echo "3회 순차 실행 시작: $(date)"
 echo "영상: $VIDEO"
-echo "튜닝값: closed-ratio=0.75, reopen-ratio=0.85, danger-seconds=1.7"
+echo "튜닝값: closed-ratio=0.72, reopen-ratio=0.85, danger-seconds=1.7"
 echo "=========================================="
 
 for i in 1 2 3; do
     echo ""
     echo "----- [$i/3] 실행 시작: $(date) -----"
     python3 run_video_inference_FSM.py "$VIDEO" \
-        --closed-ratio 0.75 \
+        --closed-ratio 0.72 \
         --reopen-ratio 0.85 \
         --danger-seconds 1.7
     echo "----- [$i/3] 실행 완료: $(date) -----"
