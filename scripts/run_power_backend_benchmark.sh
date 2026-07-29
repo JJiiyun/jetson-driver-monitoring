@@ -26,6 +26,8 @@ TEGRA_CSV="$OUTPUT_DIR/${STEM}_tegrastats.csv"
 TEGRA_SUMMARY="$OUTPUT_DIR/${STEM}_tegrastats_summary.csv"
 RUN_LOG="$OUTPUT_DIR/${STEM}_run.log"
 COLLECTOR_PID=""
+COLLECTOR_WRAPPER_PID=""
+COLLECTOR_PID_FILE="$OUTPUT_DIR/.collector.pid"
 
 case "$BACKEND" in
     opencv-cuda-fp32|tensorrt-fp32|tensorrt-fp16)
@@ -46,10 +48,22 @@ if [ ! -f "$VIDEO" ]; then
 fi
 
 cleanup() {
-    if [ -n "$COLLECTOR_PID" ] && kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+    if [ -n "$COLLECTOR_PID" ] && sudo kill -0 "$COLLECTOR_PID" 2>/dev/null; then
         sudo kill -TERM "$COLLECTOR_PID" 2>/dev/null || true
-        wait "$COLLECTOR_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6; do
+            if ! sudo kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
+        if sudo kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+            sudo kill -KILL "$COLLECTOR_PID" 2>/dev/null || true
+        fi
     fi
+    if [ -n "$COLLECTOR_WRAPPER_PID" ]; then
+        wait "$COLLECTOR_WRAPPER_PID" 2>/dev/null || true
+    fi
+    sudo rm -f "$COLLECTOR_PID_FILE" 2>/dev/null || true
     if [ -f "$TEGRA_CSV" ]; then
         sudo chown "$(id -u):$(id -g)" "$TEGRA_CSV" 2>/dev/null || true
     fi
@@ -77,11 +91,26 @@ sudo mkdir -p "$OUTPUT_DIR"
 sudo chown "$(id -u):$(id -g)" "$OUTPUT_DIR"
 
 echo "[2/3] tegrastats + INA3221 수집 시작"
-sudo -E "$PYTHON" "$COLLECTOR" \
-    --interval 500 \
-    --out "$TEGRA_CSV" \
-    --summary-out "$TEGRA_SUMMARY" &
-COLLECTOR_PID=$!
+sudo -E sh -c '
+    echo "$$" > "$1"
+    exec "$2" "$3" \
+        --interval 500 \
+        --out "$4" \
+        --summary-out "$5"
+' sh "$COLLECTOR_PID_FILE" "$PYTHON" "$COLLECTOR" \
+    "$TEGRA_CSV" "$TEGRA_SUMMARY" &
+COLLECTOR_WRAPPER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$COLLECTOR_PID_FILE" ]; then
+        break
+    fi
+    sleep 0.2
+done
+if [ ! -s "$COLLECTOR_PID_FILE" ]; then
+    echo "[ERROR] 전력 수집기 PID를 확인할 수 없습니다."
+    exit 1
+fi
+COLLECTOR_PID="$(cat "$COLLECTOR_PID_FILE")"
 sleep 2
 
 echo "[3/3] 모델 벤치마크 시작"
@@ -96,6 +125,7 @@ set -e
 
 cleanup
 COLLECTOR_PID=""
+COLLECTOR_WRAPPER_PID=""
 trap - EXIT INT TERM
 
 if [ "$BENCHMARK_STATUS" -ne 0 ]; then
