@@ -36,6 +36,7 @@ from drowsiness.detectors import (
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor
 from drowsiness.qt_dashboard import create_qt_application, create_risk_dashboard
+from drowsiness.risk_controller import BuzzerMode, RiskDecision, RiskLevel
 # === [하품 추가 1] YawnMonitor import ===
 # 하품 검출 모듈. drowsiness/yawn_monitor.py 에 위치.
 from drowsiness.yawn_monitor import YawnMonitor
@@ -43,6 +44,7 @@ from drowsiness.yawn_monitor import YawnMonitor
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_YUNET_FP16_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp16/yunet_fp16.engine"
+DEFAULT_YUNET_FP32_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp32/yunet_fp32.engine"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
 DEFAULT_PFLD_FP16_ENGINE_PATH = (
     PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
@@ -112,6 +114,16 @@ def selected_engine_path(args: argparse.Namespace) -> Path | None:
     return DEFAULT_PFLD_FP16_ENGINE_PATH
 
 
+def selected_yunet_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.face_backend.startswith("tensorrt-"):
+        return None
+    if args.yunet_engine is not None:
+        return args.yunet_engine
+    if args.face_backend == "tensorrt-fp32":
+        return DEFAULT_YUNET_FP32_ENGINE_PATH
+    return DEFAULT_YUNET_FP16_ENGINE_PATH
+
+
 def parse_args(use_fsm: bool = False) -> argparse.Namespace:
     mode = "FSM with hysteresis" if use_fsm else "single EAR threshold"
     parser = argparse.ArgumentParser(
@@ -132,13 +144,25 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         action="store_true",
         help="처리 중 결과 화면 표시",
     )
+    parser.add_argument(
+        "--no-overlay",
+        action="store_true",
+        help="랜드마크, 상태 텍스트 및 박스 오버레이를 그리지 않음",
+    )
+    parser.add_argument(
+        "--no-save-video",
+        action="store_true",
+        help="결과 영상을 인코딩하거나 저장하지 않음",
+    )
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument(
-        "--face-backend", choices=("opencv-fp32", "tensorrt-fp16"),
+        "--face-backend",
+        choices=("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16"),
         default="opencv-fp32",
     )
     parser.add_argument(
-        "--yunet-engine", type=Path, default=DEFAULT_YUNET_FP16_ENGINE_PATH
+        "--yunet-engine", type=Path, default=None,
+        help="TensorRT YuNet engine override (default: selected by precision)",
     )
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
@@ -206,6 +230,14 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         action="store_true",
         help="추론 중 Qt 위험 대시보드 표시",
     )
+    parser.add_argument(
+        "--disable-risk-fsm",
+        action="store_true",
+        help=(
+            "종합 위험 FSM과 액추에이터 이벤트만 비활성화. 모델 추론, "
+            "눈/하품 계산, 오버레이 및 영상 저장은 그대로 수행"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -237,6 +269,10 @@ def parse_args(use_fsm: bool = False) -> argparse.Namespace:
         )
     if args.yawn_seconds <= 0.0:
         parser.error("--yawn-seconds must be greater than zero")
+    if args.disable_risk_fsm and args.qt_dashboard:
+        parser.error("--qt-dashboard cannot be used with --disable-risk-fsm")
+    if args.disable_risk_fsm and args.buzzer_pin is not None:
+        parser.error("--buzzer-pin cannot be used with --disable-risk-fsm")
     if (
         args.output is not None
         and args.output.resolve() == args.input.resolve()
@@ -288,9 +324,10 @@ def main(use_fsm: bool = False) -> int:
         return 1
 
     try:
+        yunet_engine_path = selected_yunet_engine_path(args)
         face_detector = (
-            TensorRTYuNetFaceDetector(args.yunet_engine)
-            if args.face_backend == "tensorrt-fp16"
+            TensorRTYuNetFaceDetector(yunet_engine_path)
+            if yunet_engine_path is not None
             else YuNetFaceDetector(
                 args.yunet, input_size=(width, height), device=args.opencv_device
             )
@@ -348,6 +385,9 @@ def main(use_fsm: bool = False) -> int:
         backend=(
             f"{args.face_backend.replace('-', '_')}_yunet_pfld_{landmark_backend_name}"
             f"_video_{'fsm' if use_fsm else 'basic'}"
+            f"{'_no_risk_fsm' if args.disable_risk_fsm else ''}"
+            f"{'_no_overlay' if args.no_overlay else ''}"
+            f"{'_no_video' if args.no_save_video else ''}"
         ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
@@ -362,17 +402,19 @@ def main(use_fsm: bool = False) -> int:
         if args.output is not None
         else default_output_path(args.input, logger.run_id, use_fsm)
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    if not writer.isOpened():
-        capture.release()
-        print(f"[ERROR] Cannot create output video: {output_path}")
-        return 1
+    writer = None
+    if not args.no_save_video:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            capture.release()
+            print(f"[ERROR] Cannot create output video: {output_path}")
+            return 1
 
     if args.buzzer_pin is not None:
         try:
@@ -384,15 +426,18 @@ def main(use_fsm: bool = False) -> int:
             buzzer_actuator = BuzzerPatternController(buzzer_output)
             risk_publisher.subscribe(buzzer_actuator.publish)
         except (ValueError, RuntimeError) as error:
-            writer.release()
+            if writer is not None:
+                writer.release()
             capture.release()
             print(f"[ERROR] Cannot initialize buzzer: {error}")
             return 1
 
     print(f"Input: {args.input}")
-    print(f"Output: {output_path}")
+    print(f"Output: {output_path if writer is not None else 'disabled'}")
     print(f"Landmark backend: {args.landmark_backend}")
     print(f"Face backend: {args.face_backend}")
+    if yunet_engine_path is not None:
+        print(f"YuNet TensorRT engine: {yunet_engine_path}")
     if engine_path is not None:
         print(f"TensorRT engine: {engine_path}")
     print(
@@ -402,6 +447,10 @@ def main(use_fsm: bool = False) -> int:
             if use_fsm
             else "basic single-threshold"
         )
+    )
+    print(
+        "Aggregate risk FSM: "
+        + ("disabled" if args.disable_risk_fsm else "enabled")
     )
     print(f"Frames: {total_frames if total_frames > 0 else 'unknown'}")
     print("The first 3 seconds with a valid face are used for calibration.")
@@ -466,35 +515,35 @@ def main(use_fsm: bool = False) -> int:
                     mar_value, timestamp=timestamp
                 )
 
-                draw_points(
-                    frame,
-                    landmarks[list(RIGHT_EYE_INDICES)],
-                    (0, 255, 0),
-                )
-                draw_points(
-                    frame,
-                    landmarks[list(LEFT_EYE_INDICES)],
-                    (0, 255, 0),
-                )
-                draw_points(
-                    frame,
-                    landmarks[list(MOUTH_LRTB_INDICES)],
-                    (255, 0, 0),
-                )
-                x, y, box_width, box_height = detection.box
-                cv2.rectangle(
-                    frame,
-                    (x, y),
-                    (x + box_width, y + box_height),
-                    (0, 255, 0),
-                    2,
-                )
-                # === [하품 추가 7] 화면에 하품 표시 (선택) ===
-                if yawn_state is not None and yawn_state.is_yawning:
-                    cv2.putText(
-                        frame, "YAWNING", (x, max(0, y - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2,
+                if not args.no_overlay:
+                    draw_points(
+                        frame,
+                        landmarks[list(RIGHT_EYE_INDICES)],
+                        (0, 255, 0),
                     )
+                    draw_points(
+                        frame,
+                        landmarks[list(LEFT_EYE_INDICES)],
+                        (0, 255, 0),
+                    )
+                    draw_points(
+                        frame,
+                        landmarks[list(MOUTH_LRTB_INDICES)],
+                        (255, 0, 0),
+                    )
+                    x, y, box_width, box_height = detection.box
+                    cv2.rectangle(
+                        frame,
+                        (x, y),
+                        (x + box_width, y + box_height),
+                        (0, 255, 0),
+                        2,
+                    )
+                    if yawn_state is not None and yawn_state.is_yawning:
+                        cv2.putText(
+                            frame, "YAWNING", (x, max(0, y - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2,
+                        )
 
             eye_state = eye_monitor.update(mean_ear, timestamp=timestamp)
             perclos_state = perclos_monitor.update(
@@ -507,41 +556,65 @@ def main(use_fsm: bool = False) -> int:
                 if yawn_state is not None
                 else False
             )
-            risk_decision = risk_controller.update(
-                timestamp=timestamp,
-                eye_danger=eye_state.is_danger,
-                perclos_caution=perclos_state.is_caution,
-                perclos_warning=perclos_state.is_warning,
-                is_yawning=is_yawning,
-                valid_face=eye_state.valid_face,
-            )
-            risk_publisher.publish(risk_decision)
+            if args.disable_risk_fsm:
+                risk_decision = RiskDecision(
+                    timestamp=timestamp,
+                    level=RiskLevel.NORMAL,
+                    previous_level=RiskLevel.NORMAL,
+                    reasons=("RISK_FSM_DISABLED",),
+                    recent_yawn_count=0,
+                    buzzer_mode=BuzzerMode.OFF,
+                    hazard_light=False,
+                    stop_request=False,
+                    changed=False,
+                    acknowledged=False,
+                )
+            else:
+                risk_decision = risk_controller.update(
+                    timestamp=timestamp,
+                    eye_danger=eye_state.is_danger,
+                    perclos_caution=perclos_state.is_caution,
+                    perclos_warning=perclos_state.is_warning,
+                    is_yawning=is_yawning,
+                    valid_face=eye_state.valid_face,
+                )
+                risk_publisher.publish(risk_decision)
             if qt_app is not None:
                 qt_app.processEvents()
                 if dashboard is not None and not dashboard.isVisible():
                     break
-            draw_status_overlay(
-                frame,
-                eye_state,
-                perclos_state,
-                right_ear=right_ear,
-                left_ear=left_ear,
-                detection_score=detection_score,
-                fps=logger.current_fps,
-                face_box=(
-                    None if detection is None else detection.box
-                ),
-            )
-            cv2.putText(
-                frame,
-                f"RISK: {risk_decision.level.value}",
-                (20, frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 0, 255) if risk_decision.stop_request else (0, 200, 255),
-                2,
-            )
-            writer.write(frame)
+            if not args.no_overlay:
+                draw_status_overlay(
+                    frame,
+                    eye_state,
+                    perclos_state,
+                    right_ear=right_ear,
+                    left_ear=left_ear,
+                    detection_score=detection_score,
+                    fps=logger.current_fps,
+                    face_box=(
+                        None if detection is None else detection.box
+                    ),
+                )
+                cv2.putText(
+                    frame,
+                    (
+                        "RISK FSM: OFF"
+                        if args.disable_risk_fsm
+                        else f"RISK: {risk_decision.level.value}"
+                    ),
+                    (20, frame.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (
+                        (0, 0, 255)
+                        if risk_decision.stop_request
+                        else (0, 200, 255)
+                    ),
+                    2,
+                )
+            if writer is not None:
+                writer.write(frame)
 
             if args.show:
                 cv2.imshow("ZZM Video Inference", frame)
@@ -607,13 +680,15 @@ def main(use_fsm: bool = False) -> int:
             dashboard.close()
         if buzzer_actuator is not None:
             buzzer_actuator.close()
-        writer.release()
+        if writer is not None:
+            writer.release()
         capture.release()
         cv2.destroyAllWindows()
 
     summary = logger.write_csv()
     logger.print_summary(summary)
-    print(f"Annotated video: {output_path}")
+    if writer is not None:
+        print(f"Annotated video: {output_path}")
     print(f"Frame CSV: {logger.frame_csv_path}")
     print(f"Summary CSV: {logger.summary_csv_path}")
     return 0

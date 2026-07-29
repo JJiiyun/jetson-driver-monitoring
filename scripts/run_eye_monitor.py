@@ -42,6 +42,7 @@ from benchmark import PerformanceLogger
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
 DEFAULT_YUNET_FP16_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp16/yunet_fp16.engine"
+DEFAULT_YUNET_FP32_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp32/yunet_fp32.engine"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
 DEFAULT_PFLD_FP16_ENGINE_PATH = (
     PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
@@ -106,6 +107,16 @@ def selected_engine_path(args: argparse.Namespace) -> Path | None:
     return DEFAULT_PFLD_FP16_ENGINE_PATH
 
 
+def selected_yunet_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.face_backend.startswith("tensorrt-"):
+        return None
+    if args.yunet_engine is not None:
+        return args.yunet_engine
+    if args.face_backend == "tensorrt-fp32":
+        return DEFAULT_YUNET_FP32_ENGINE_PATH
+    return DEFAULT_YUNET_FP16_ENGINE_PATH
+
+
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -157,11 +168,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
     parser.add_argument(
-        "--face-backend", choices=("opencv-fp32", "tensorrt-fp16"),
+        "--face-backend",
+        choices=("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16"),
         default="opencv-fp32",
     )
     parser.add_argument(
-        "--yunet-engine", type=Path, default=DEFAULT_YUNET_FP16_ENGINE_PATH
+        "--yunet-engine", type=Path, default=None,
+        help="TensorRT YuNet engine override (default: selected by precision)",
     )
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
     parser.add_argument(
@@ -278,9 +291,10 @@ def main() -> int:
         return 1
 
     try:
+        yunet_engine_path = selected_yunet_engine_path(args)
         face_detector = (
-            TensorRTYuNetFaceDetector(args.yunet_engine)
-            if args.face_backend == "tensorrt-fp16"
+            TensorRTYuNetFaceDetector(yunet_engine_path)
+            if yunet_engine_path is not None
             else YuNetFaceDetector(
                 args.yunet,
                 input_size=(args.width, args.height),
