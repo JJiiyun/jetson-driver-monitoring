@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import statistics
 import sys
 import time
@@ -227,4 +228,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if exit_code == 0:
+        # TensorRT and PyCUDA can segfault during interpreter teardown when
+        # multiple contexts are destroyed in an unsafe module-finalization
+        # order. All benchmark outputs are already closed and flushed here,
+        # so let the OS release process-owned CUDA resources.
+        os._exit(0)
+    raise SystemExit(exit_code)
