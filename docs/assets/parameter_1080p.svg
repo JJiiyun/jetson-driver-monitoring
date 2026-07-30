@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" role="img" aria-label="1080p closed ratio comparison">
+<rect width="900" height="430" fill="#fff"/><text x="450" y="30" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="bold">1080p closed_ratio: 검출률과 오탐 절충</text>
+<line x1="90" y1="350" x2="840" y2="350" stroke="#444"/><line x1="90" y1="60" x2="90" y2="350" stroke="#444"/>
+<g font-family="sans-serif" font-size="13" fill="#333"><text x="55" y="355">0</text><text x="45" y="285">25</text><text x="45" y="215">50</text><text x="45" y="145">75</text><text x="38" y="75">100%</text></g>
+<g fill="#3979c3"><rect x="160" y="114" width="70" height="236"/><rect x="405" y="85" width="70" height="265"/><rect x="650" y="70" width="70" height="280"/></g>
+<g font-family="sans-serif" font-size="14" text-anchor="middle"><text x="195" y="105">84.2%</text><text x="440" y="76">94.7%</text><text x="685" y="61">100%</text><text x="195" y="375">0.70</text><text x="440" y="375" font-weight="bold">0.72</text><text x="685" y="375">0.75</text></g>
+<polyline points="195,344 440,300 685,164" fill="none" stroke="#e45756" stroke-width="4"/><g fill="#e45756"><circle cx="195" cy="344" r="6"/><circle cx="440" cy="300" r="6"/><circle cx="685" cy="164" r="6"/></g>
+<g font-family="sans-serif" font-size="13" fill="#b33" text-anchor="middle"><text x="195" y="333">오탐 2</text><text x="440" y="289">오탐 10</text><text x="685" y="153">오탐 37</text></g>
+<rect x="610" y="395" width="14" height="14" fill="#3979c3"/><text x="630" y="407" font-family="sans-serif" font-size="13">Event Recall</text><line x1="740" y1="402" x2="765" y2="402" stroke="#e45756" stroke-width="4"/><text x="772" y="407" font-family="sans-serif" font-size="13">False alarms</text>
+</svg>

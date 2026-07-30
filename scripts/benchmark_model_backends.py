@@ -224,17 +224,14 @@ def main() -> int:
     print(f"Model FPS: {summary['model_fps']:.2f}")
     print(f"Frames CSV: {frames_path}")
     print(f"Summary CSV: {summary_path}")
-    return 0
+    # Exit while TensorRT/PyCUDA objects are still referenced by this frame.
+    # Returning first destroys local detector objects and can segfault when
+    # TensorRT and PyCUDA tear down their shared CUDA context in the wrong
+    # order on Jetson (exit 139).
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    if exit_code == 0:
-        # TensorRT and PyCUDA can segfault during interpreter teardown when
-        # multiple contexts are destroyed in an unsafe module-finalization
-        # order. All benchmark outputs are already closed and flushed here,
-        # so let the OS release process-owned CUDA resources.
-        os._exit(0)
-    raise SystemExit(exit_code)
+    raise SystemExit(main())

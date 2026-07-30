@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -75,6 +76,58 @@ class JetsonGPIOOutput:
     def close(self) -> None:
         self.set_active(False)
         self._gpio.cleanup(self._pin)
+
+
+class SoftwareToneGPIOOutput:
+    """Generate an active-high or active-low tone for a passive piezo."""
+
+    def __init__(
+        self,
+        pin: int,
+        *,
+        frequency_hz: float = 1800.0,
+        numbering: str = "BOARD",
+        active_high: bool = True,
+    ) -> None:
+        if not 50.0 <= frequency_hz <= 5000.0:
+            raise ValueError("buzzer frequency must be between 50 and 5000 Hz")
+        self._output = JetsonGPIOOutput(
+            pin,
+            numbering=numbering,
+            active_high=active_high,
+        )
+        self._half_period = 0.5 / float(frequency_hz)
+        self._tone_enabled = False
+        self._closed = False
+        self._wake = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="passive-buzzer-tone", daemon=True
+        )
+        self._thread.start()
+
+    def set_active(self, active: bool) -> None:
+        self._tone_enabled = bool(active)
+        self._wake.set()
+
+    def close(self) -> None:
+        self._closed = True
+        self._tone_enabled = False
+        self._wake.set()
+        self._thread.join(timeout=2.0)
+        self._output.close()
+
+    def _run(self) -> None:
+        while not self._closed:
+            if not self._tone_enabled:
+                self._output.set_active(False)
+                self._wake.wait()
+                self._wake.clear()
+                continue
+            self._output.set_active(True)
+            time.sleep(self._half_period)
+            self._output.set_active(False)
+            time.sleep(self._half_period)
+        self._output.set_active(False)
 
 
 class BuzzerPatternController:

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" role="img" aria-label="Pure model backend FPS comparison">
+<rect width="900" height="430" fill="#fff"/><text x="450" y="30" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="bold">순수 YuNet + PFLD 모델 성능</text>
+<line x1="100" y1="350" x2="840" y2="350" stroke="#444"/><line x1="100" y1="60" x2="100" y2="350" stroke="#444"/>
+<g font-family="sans-serif" font-size="13"><text x="65" y="355">0</text><text x="60" y="260">8</text><text x="52" y="165">16</text><text x="52" y="70">24 FPS</text></g>
+<rect x="165" y="241" width="100" height="109" fill="#777"/><rect x="405" y="77" width="100" height="273" fill="#3979c3"/><rect x="645" y="74" width="100" height="276" fill="#7b4ab5"/>
+<g font-family="sans-serif" text-anchor="middle"><text x="215" y="231">8.99</text><text x="455" y="67">22.60</text><text x="695" y="64">22.81</text><text x="215" y="375">OpenCV CUDA</text><text x="455" y="375">TensorRT FP32</text><text x="695" y="375">TensorRT FP16</text><text x="215" y="400" font-size="13">111.26 ms</text><text x="455" y="400" font-size="13">44.24 ms</text><text x="695" y="400" font-size="13">43.84 ms</text></g>
+</svg>

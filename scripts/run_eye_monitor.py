@@ -26,6 +26,7 @@ from drowsiness.actions import (
     BuzzerPatternController,
     JetsonGPIOOutput,
     RiskEventPublisher,
+    SoftwareToneGPIOOutput,
 )
 from drowsiness.detectors import (
     PFLDLandmarkDetector,
@@ -233,6 +234,16 @@ def parse_args() -> argparse.Namespace:
         help="Use a buzzer module that turns on with a LOW signal",
     )
     parser.add_argument(
+        "--passive-buzzer-frequency",
+        type=positive_float,
+        default=None,
+        metavar="HZ",
+        help=(
+            "Generate a software PWM tone for a passive piezo buzzer "
+            "(lower-pitch starting point: 1800)"
+        ),
+    )
+    parser.add_argument(
         "--qt-dashboard",
         action="store_true",
         help="Show the Qt risk dashboard alongside the camera view",
@@ -253,6 +264,13 @@ def parse_args() -> argparse.Namespace:
     if args.yawn_close_ratio >= args.yawn_open_ratio:
         parser.error(
             "--yawn-open-ratio must be greater than --yawn-close-ratio"
+        )
+    if (
+        args.passive_buzzer_frequency is not None
+        and args.buzzer_pin is None
+    ):
+        parser.error(
+            "--passive-buzzer-frequency requires --buzzer-pin"
         )
     return args
 
@@ -385,11 +403,18 @@ def main() -> int:
 
     if args.buzzer_pin is not None:
         try:
-            buzzer_output = JetsonGPIOOutput(
-                args.buzzer_pin,
-                numbering=args.gpio_numbering,
-                active_high=not args.buzzer_active_low,
+            output_type = (
+                SoftwareToneGPIOOutput
+                if args.passive_buzzer_frequency is not None
+                else JetsonGPIOOutput
             )
+            output_options = {
+                "numbering": args.gpio_numbering,
+                "active_high": not args.buzzer_active_low,
+            }
+            if args.passive_buzzer_frequency is not None:
+                output_options["frequency_hz"] = args.passive_buzzer_frequency
+            buzzer_output = output_type(args.buzzer_pin, **output_options)
             buzzer_actuator = BuzzerPatternController(buzzer_output)
             risk_publisher.subscribe(buzzer_actuator.publish)
         except (ValueError, RuntimeError) as error:
