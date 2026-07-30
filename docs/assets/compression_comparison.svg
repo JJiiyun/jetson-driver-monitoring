@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" role="img" aria-label="Video compression performance comparison">
+<rect width="900" height="430" fill="#fff"/><text x="450" y="30" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="bold">closed_ratio 0.72: 해상도/압축 비교</text>
+<line x1="100" y1="350" x2="840" y2="350" stroke="#444"/><line x1="100" y1="60" x2="100" y2="350" stroke="#444"/>
+<g font-family="sans-serif" font-size="13" fill="#333"><text x="60" y="355">0 FPS</text><text x="52" y="260">5</text><text x="45" y="165">10</text><text x="45" y="70">15</text></g>
+<g fill="#43a047"><rect x="165" y="313" width="90" height="37"/><rect x="405" y="170" width="90" height="180"/><rect x="645" y="85" width="90" height="265"/></g>
+<g font-family="sans-serif" font-size="14" text-anchor="middle"><text x="210" y="303">1.93 FPS</text><text x="450" y="160">9.33 FPS</text><text x="690" y="75">13.70 FPS</text><text x="210" y="375">1080p 원본</text><text x="450" y="375">첫 압축본</text><text x="690" y="375">최종 640×360</text><text x="210" y="400">Recall 94.7%</text><text x="450" y="400">Recall 84.2%</text><text x="690" y="400">Recall 100%</text></g>
+</svg>

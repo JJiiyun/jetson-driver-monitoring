@@ -8,6 +8,12 @@ from .metrics import (
     mean_eye_aspect_ratio,
     mouth_display_points,
 )
+from .risk_controller import (
+    BuzzerMode,
+    DrowsinessRiskController,
+    RiskDecision,
+    RiskLevel,
+)
 
 __all__ = [
     "EyeClosureMonitor",
@@ -20,4 +26,8 @@ __all__ = [
     "eye_display_points",
     "mean_eye_aspect_ratio",
     "mouth_display_points",
+    "BuzzerMode",
+    "DrowsinessRiskController",
+    "RiskDecision",
+    "RiskLevel",
 ]

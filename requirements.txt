@@ -10,3 +10,4 @@
 # python3 -m venv --system-site-packages ~/zzmenv
 
 numpy==1.24.4
+pycuda==2022.1

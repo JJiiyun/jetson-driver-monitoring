@@ -16,19 +16,41 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from drowsiness import (
+    DrowsinessRiskController,
     EyeClosureMonitor,
     LEFT_EYE_INDICES,
     RIGHT_EYE_INDICES,
     mean_eye_aspect_ratio,
 )
-from drowsiness.detectors import PFLDLandmarkDetector, YuNetFaceDetector
+from drowsiness.actions import (
+    BuzzerPatternController,
+    JetsonGPIOOutput,
+    RiskEventPublisher,
+    SoftwareToneGPIOOutput,
+)
+from drowsiness.detectors import (
+    PFLDLandmarkDetector,
+    PFLDTensorRTDetector,
+    TensorRTYuNetFaceDetector,
+    YuNetFaceDetector,
+)
 from drowsiness.overlay import draw_status_overlay
 from drowsiness.perclos_monitor import PerclosMonitor  # [PERCLOS] 추가
+from drowsiness.qt_dashboard import create_qt_application, create_risk_dashboard
+from drowsiness.yawn_monitor import YawnMonitor
 from benchmark import PerformanceLogger
 
 
 DEFAULT_YUNET_PATH = PROJECT_ROOT / "models/face_detector/yunet.onnx"
+DEFAULT_YUNET_FP16_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp16/yunet_fp16.engine"
+DEFAULT_YUNET_FP32_ENGINE_PATH = PROJECT_ROOT / "models/engines/fp32/yunet_fp32.engine"
 DEFAULT_PFLD_PATH = PROJECT_ROOT / "models/landmark/pfld_sim.onnx"
+DEFAULT_PFLD_FP16_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp16/pfld_fp16.engine"
+)
+DEFAULT_PFLD_FP32_ENGINE_PATH = (
+    PROJECT_ROOT / "models/engines/fp32/pfld_fp32.engine"
+)
 RESULTS_DIR = PROJECT_ROOT / "benchmark/results"
 VIDEO_DIR = PROJECT_ROOT / "outputs/videos"
 # 입 상하좌우 4점 (68점 규약): 48=좌끝, 54=우끝, 62=안쪽 윗입술, 66=안쪽 아랫입술
@@ -48,7 +70,52 @@ EYE_FRAME_FIELDS = [
     "perclos",          # [PERCLOS] 추가
     "perclos_caution",  # [PERCLOS] 추가
     "perclos_warning",  # [PERCLOS] 추가
+    "mar",
+    "is_yawning",
+    "yawn_seconds",
+    "risk_level",
+    "risk_reasons",
+    "recent_yawn_count",
+    "buzzer_mode",
+    "hazard_light",
+    "stop_request",
 ]
+
+
+LANDMARK_BACKEND_ALIASES = {
+    "opencv": "opencv-fp32",
+    "tensorrt": "tensorrt-fp16",
+}
+
+
+def landmark_backend(value: str) -> str:
+    normalized = LANDMARK_BACKEND_ALIASES.get(value, value)
+    valid = ("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16")
+    if normalized not in valid:
+        raise argparse.ArgumentTypeError(
+            "must be opencv-fp32, tensorrt-fp32, or tensorrt-fp16"
+        )
+    return normalized
+
+
+def selected_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.landmark_backend.startswith("tensorrt-"):
+        return None
+    if args.pfld_engine is not None:
+        return args.pfld_engine
+    if args.landmark_backend == "tensorrt-fp32":
+        return DEFAULT_PFLD_FP32_ENGINE_PATH
+    return DEFAULT_PFLD_FP16_ENGINE_PATH
+
+
+def selected_yunet_engine_path(args: argparse.Namespace) -> Path | None:
+    if not args.face_backend.startswith("tensorrt-"):
+        return None
+    if args.yunet_engine is not None:
+        return args.yunet_engine
+    if args.face_backend == "tensorrt-fp32":
+        return DEFAULT_YUNET_FP32_ENGINE_PATH
+    return DEFAULT_YUNET_FP16_ENGINE_PATH
 
 
 def positive_int(value: str) -> int:
@@ -101,7 +168,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=positive_int, default=480)
     parser.add_argument("--fps", type=positive_int, default=30)
     parser.add_argument("--yunet", type=Path, default=DEFAULT_YUNET_PATH)
+    parser.add_argument(
+        "--face-backend",
+        choices=("opencv-fp32", "tensorrt-fp32", "tensorrt-fp16"),
+        default="opencv-fp32",
+    )
+    parser.add_argument(
+        "--yunet-engine", type=Path, default=None,
+        help="TensorRT YuNet engine override (default: selected by precision)",
+    )
     parser.add_argument("--pfld", type=Path, default=DEFAULT_PFLD_PATH)
+    parser.add_argument(
+        "--opencv-device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="OpenCV DNN device for YuNet and ONNX PFLD (default: cpu)",
+    )
+    parser.add_argument(
+        "--landmark-backend",
+        type=landmark_backend,
+        default="opencv-fp32",
+        metavar="{opencv-fp32,tensorrt-fp32,tensorrt-fp16}",
+        help="PFLD inference backend and precision (default: opencv-fp32)",
+    )
+    parser.add_argument(
+        "--pfld-engine",
+        type=Path,
+        default=None,
+        help="Override the FP32/FP16 TensorRT engine selected by the backend",
+    )
     parser.add_argument(
         "--calibration-seconds", type=positive_float, default=3.0
     )
@@ -124,6 +219,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--perclos-warning", type=closed_unit_interval, default=0.30
     )
+    parser.add_argument("--yawn-open-ratio", type=positive_float, default=0.18)
+    parser.add_argument("--yawn-close-ratio", type=positive_float, default=0.14)
+    parser.add_argument("--yawn-seconds", type=positive_float, default=0.3)
+    parser.add_argument(
+        "--buzzer-pin", type=positive_int, default=None,
+        help="Physical buzzer GPIO pin; omitted means no GPIO access",
+    )
+    parser.add_argument(
+        "--gpio-numbering", choices=("BOARD", "BCM"), default="BOARD"
+    )
+    parser.add_argument(
+        "--buzzer-active-low", action="store_true",
+        help="Use a buzzer module that turns on with a LOW signal",
+    )
+    parser.add_argument(
+        "--passive-buzzer-frequency",
+        type=positive_float,
+        default=None,
+        metavar="HZ",
+        help=(
+            "Generate a software PWM tone for a passive piezo buzzer "
+            "(lower-pitch starting point: 1800)"
+        ),
+    )
+    parser.add_argument(
+        "--qt-dashboard",
+        action="store_true",
+        help="Show the Qt risk dashboard alongside the camera view",
+    )
     parser.add_argument("--warmup-frames", type=nonnegative_int, default=30)
     parser.add_argument("--video-dir", type=Path, default=VIDEO_DIR)
     parser.add_argument("--video-codec", default="MJPG")
@@ -136,6 +260,17 @@ def parse_args() -> argparse.Namespace:
     if args.closed_ratio >= args.reopen_ratio:
         parser.error(
             "--reopen-ratio must be greater than --closed-ratio"
+        )
+    if args.yawn_close_ratio >= args.yawn_open_ratio:
+        parser.error(
+            "--yawn-open-ratio must be greater than --yawn-close-ratio"
+        )
+    if (
+        args.passive_buzzer_frequency is not None
+        and args.buzzer_pin is None
+    ):
+        parser.error(
+            "--passive-buzzer-frequency requires --buzzer-pin"
         )
     return args
 
@@ -168,17 +303,29 @@ def open_camera(args: argparse.Namespace) -> cv2.VideoCapture:
 
 def main() -> int:
     args = parse_args()
+    buzzer_actuator = None
     if len(args.video_codec) != 4:
         print("[ERROR] --video-codec must contain exactly four characters.")
         return 1
 
     try:
-        face_detector = YuNetFaceDetector(
-            args.yunet,
-            input_size=(args.width, args.height),
+        yunet_engine_path = selected_yunet_engine_path(args)
+        face_detector = (
+            TensorRTYuNetFaceDetector(yunet_engine_path)
+            if yunet_engine_path is not None
+            else YuNetFaceDetector(
+                args.yunet,
+                input_size=(args.width, args.height),
+                device=args.opencv_device,
+            )
         )
-        landmark_detector = PFLDLandmarkDetector(args.pfld)
-    except (FileNotFoundError, RuntimeError, cv2.error) as error:
+        engine_path = selected_engine_path(args)
+        landmark_detector = (
+            PFLDTensorRTDetector(engine_path)
+            if engine_path is not None
+            else PFLDLandmarkDetector(args.pfld, device=args.opencv_device)
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
         print(f"[ERROR] {error}")
         return 1
 
@@ -194,6 +341,25 @@ def main() -> int:
         caution_perclos=args.perclos_caution,
         warning_perclos=args.perclos_warning,
     )
+    yawn_monitor = YawnMonitor(
+        open_ratio=args.yawn_open_ratio,
+        close_ratio=args.yawn_close_ratio,
+        yawn_seconds=args.yawn_seconds,
+    )
+    risk_controller = DrowsinessRiskController()
+    risk_publisher = RiskEventPublisher()
+    qt_app = None
+    dashboard = None
+    if args.qt_dashboard:
+        try:
+            qt_app = create_qt_application(sys.argv)
+            dashboard = create_risk_dashboard(
+                risk_controller, risk_publisher
+            )
+            dashboard.show()
+        except RuntimeError as error:
+            print(f"[ERROR] {error}")
+            return 1
     cap = open_camera(args)
     if not cap.isOpened():
         print(f"[ERROR] Cannot open camera index {args.camera}.")
@@ -205,7 +371,14 @@ def main() -> int:
     video_fps = reported_fps if reported_fps > 1.0 else float(args.fps)
 
     logger = PerformanceLogger(
-        backend="opencv_yunet_pfld_fp32",
+        backend=(
+            f"{args.face_backend.replace('-', '_')}_yunet_pfld_"
+            + (
+                "fp32"
+                if args.landmark_backend == "opencv-fp32"
+                else args.landmark_backend.replace("-", "_")
+            )
+        ),
         output_dir=RESULTS_DIR,
         warmup_frames=args.warmup_frames,
         input_source=f"camera:{args.camera}",
@@ -228,8 +401,34 @@ def main() -> int:
         print(f"[ERROR] Cannot create video file: {video_path}")
         return 1
 
+    if args.buzzer_pin is not None:
+        try:
+            output_type = (
+                SoftwareToneGPIOOutput
+                if args.passive_buzzer_frequency is not None
+                else JetsonGPIOOutput
+            )
+            output_options = {
+                "numbering": args.gpio_numbering,
+                "active_high": not args.buzzer_active_low,
+            }
+            if args.passive_buzzer_frequency is not None:
+                output_options["frequency_hz"] = args.passive_buzzer_frequency
+            buzzer_output = output_type(args.buzzer_pin, **output_options)
+            buzzer_actuator = BuzzerPatternController(buzzer_output)
+            risk_publisher.subscribe(buzzer_actuator.publish)
+        except (ValueError, RuntimeError) as error:
+            video_writer.release()
+            cap.release()
+            print(f"[ERROR] Cannot initialize buzzer: {error}")
+            return 1
+
     print("Keep both eyes naturally open during the first 3 seconds.")
-    print("Press r to recalibrate. Press q to quit.")
+    print(f"Landmark backend: {args.landmark_backend}")
+    print(f"Face backend: {args.face_backend}")
+    if engine_path is not None:
+        print(f"TensorRT engine: {engine_path}")
+    print("Press r to recalibrate, a to acknowledge, q to quit.")
     print(f"Video: {video_path}")
 
     try:
@@ -273,10 +472,20 @@ def main() -> int:
             mean_ear = None
             right_ear = None
             left_ear = None
+            mar_value = 0.0
 
             if landmarks is not None:
                 mean_ear, right_ear, left_ear = mean_eye_aspect_ratio(
                     landmarks
+                )
+                left_mouth = landmarks[MOUTH_LRTB_INDICES[0]]
+                right_mouth = landmarks[MOUTH_LRTB_INDICES[1]]
+                top_mouth = landmarks[MOUTH_LRTB_INDICES[2]]
+                bottom_mouth = landmarks[MOUTH_LRTB_INDICES[3]]
+                mouth_width = float(np.linalg.norm(left_mouth - right_mouth))
+                mouth_height = float(np.linalg.norm(top_mouth - bottom_mouth))
+                mar_value = (
+                    mouth_height / mouth_width if mouth_width > 1e-6 else 0.0
                 )
 
                 draw_points(
@@ -299,12 +508,26 @@ def main() -> int:
                 )
 
             eye_state = monitor.update(mean_ear, timestamp=now)
+            yawn_state = yawn_monitor.update(mar_value, timestamp=now)
             # [PERCLOS] 눈 감김 판정을 PERCLOS에 연결
             perclos_state = perclos_monitor.update(
                 is_closed=eye_state.is_closed,
                 valid_face=eye_state.valid_face,
                 timestamp=now,
             )
+            risk_decision = risk_controller.update(
+                timestamp=now,
+                eye_danger=eye_state.is_danger,
+                perclos_caution=perclos_state.is_caution,
+                perclos_warning=perclos_state.is_warning,
+                is_yawning=yawn_state.is_yawning,
+                valid_face=eye_state.valid_face,
+            )
+            risk_publisher.publish(risk_decision)
+            if qt_app is not None:
+                qt_app.processEvents()
+                if dashboard is not None and not dashboard.isVisible():
+                    break
             draw_status_overlay(
                 frame,
                 eye_state,
@@ -313,6 +536,18 @@ def main() -> int:
                 left_ear=left_ear,
                 detection_score=detection_score,
                 fps=logger.current_fps,
+                face_box=(
+                    None if detection is None else detection.box
+                ),
+            )
+            cv2.putText(
+                frame,
+                f"RISK: {risk_decision.level.value}",
+                (20, frame.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 0, 255) if risk_decision.stop_request else (0, 200, 255),
+                2,
             )
 
             video_writer.write(frame)
@@ -340,6 +575,15 @@ def main() -> int:
                     "perclos": perclos_state.perclos,           # [PERCLOS]
                     "perclos_caution": perclos_state.is_caution,  # [PERCLOS]
                     "perclos_warning": perclos_state.is_warning,  # [PERCLOS]
+                    "mar": yawn_state.mar,
+                    "is_yawning": yawn_state.is_yawning,
+                    "yawn_seconds": yawn_state.open_seconds,
+                    "risk_level": risk_decision.level.value,
+                    "risk_reasons": "|".join(risk_decision.reasons),
+                    "recent_yawn_count": risk_decision.recent_yawn_count,
+                    "buzzer_mode": risk_decision.buzzer_mode.value,
+                    "hazard_light": risk_decision.hazard_light,
+                    "stop_request": risk_decision.stop_request,
                 },
             )
 
@@ -348,10 +592,19 @@ def main() -> int:
             if key == ord("r"):
                 monitor.reset()
                 perclos_monitor.reset()  # [PERCLOS] 재캘리브레이션 시 함께 리셋
+                yawn_monitor.reset()
+                risk_controller.reset()
                 print("EAR calibration reset.")
+            if key == ord("a"):
+                risk_controller.acknowledge()
+                print("Drowsiness warning acknowledged; verifying recovery.")
     except KeyboardInterrupt:
         print("\nStopped by keyboard interrupt.")
     finally:
+        if dashboard is not None:
+            dashboard.close()
+        if buzzer_actuator is not None:
+            buzzer_actuator.close()
         video_writer.release()
         cap.release()
         cv2.destroyAllWindows()

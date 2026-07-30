@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400" viewBox="0 0 900 400" role="img" aria-label="Power benchmark collection status">
+<rect width="900" height="400" fill="#fff"/><text x="450" y="30" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="bold">순수 모델 전력 비교: 현재 측정 현황</text>
+<line x1="100" y1="330" x2="840" y2="330" stroke="#444"/><line x1="100" y1="60" x2="100" y2="330" stroke="#444"/>
+<g font-family="sans-serif" font-size="13"><text x="55" y="335">0 W</text><text x="62" y="245">2</text><text x="62" y="155">4</text><text x="50" y="65">6 W</text></g>
+<rect x="170" y="328" width="100" height="2" fill="#bbb"/><rect x="410" y="80" width="100" height="250" fill="#f2a93b"/><rect x="650" y="328" width="100" height="2" fill="#bbb"/>
+<g font-family="sans-serif" text-anchor="middle"><text x="220" y="310" fill="#777">미측정</text><text x="460" y="70">5.56 W</text><text x="700" y="310" fill="#777">미측정</text><text x="220" y="355">OpenCV CUDA</text><text x="460" y="355">TensorRT FP32</text><text x="700" y="355">TensorRT FP16</text><text x="460" y="380" font-size="13">유효 4회 평균</text></g>
+</svg>

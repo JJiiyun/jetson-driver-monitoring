@@ -25,6 +25,7 @@ Jetson Nano의 tegrastats 출력을 백그라운드로 받아 CSV로 저장한�
 
 import argparse
 import csv
+from pathlib import Path
 import re
 import signal
 import subprocess
@@ -39,6 +40,57 @@ CPU_RE = re.compile(r"CPU \[([^\]]+)\]")
 GR3D_RE = re.compile(r"GR3D_FREQ (\d+)%")
 CPU_TEMP_RE = re.compile(r"CPU@([\d.]+)C")
 GPU_TEMP_RE = re.compile(r"GPU@([\d.]+)C")
+
+INA_DEVICE_GLOBS = (
+    "/sys/bus/i2c/devices/*/iio:device*",
+    "/sys/devices/*/*/*/*/iio:device*",
+)
+
+
+def find_ina3221():
+    """Return the INA3221 device and its channel names when available."""
+    seen = set()
+    for pattern in INA_DEVICE_GLOBS:
+        for device in Path("/").glob(pattern.lstrip("/")):
+            resolved = device.resolve()
+            if resolved in seen or not (resolved / "in_power0_input").exists():
+                continue
+            seen.add(resolved)
+            names = {}
+            for channel in range(3):
+                try:
+                    names[channel] = (
+                        resolved / f"rail_name_{channel}"
+                    ).read_text().strip()
+                except (OSError, UnicodeDecodeError):
+                    names[channel] = f"rail_{channel}"
+            return resolved, names
+    return None, {}
+
+
+def read_ina3221(device, names):
+    values = {
+        "power_total_mw": "",
+        "power_gpu_mw": "",
+        "power_cpu_mw": "",
+    }
+    if device is None:
+        return values
+    for channel, name in names.items():
+        try:
+            power = float(
+                (device / f"in_power{channel}_input").read_text().strip()
+            )
+        except (OSError, ValueError):
+            continue
+        normalized = name.upper()
+        if normalized in {"VDD_IN", "POM_5V_IN"}:
+            values["power_total_mw"] = power
+        elif "GPU" in normalized:
+            values["power_gpu_mw"] = power
+        elif "CPU" in normalized:
+            values["power_cpu_mw"] = power
+    return values
 
 
 def parse_line(line):
@@ -83,11 +135,29 @@ def main():
                     help="tegrastats 샘플 간격(ms), 기본 1000")
     ap.add_argument("--duration", type=float, default=None,
                     help="수집 시간(초). 안 주면 Ctrl+C 까지 계속")
+    ap.add_argument(
+        "--summary-out",
+        default=None,
+        help="요약 CSV 경로(기본: --out 파일명 뒤에 _summary 추가)",
+    )
     args = ap.parse_args()
 
     fields = ["elapsed_s", "ram_used_mb", "ram_total_mb",
               "cpu_pct_avg", "cpu_cores", "gr3d_pct",
-              "temp_cpu_c", "temp_gpu_c"]
+              "temp_cpu_c", "temp_gpu_c",
+              "power_total_mw", "power_gpu_mw", "power_cpu_mw"]
+    ina_device, rail_names = find_ina3221()
+    if ina_device is None:
+        print("전력 센서: INA3221을 찾지 못함")
+    else:
+        print(f"전력 센서: {ina_device}")
+        print(
+            "  rails: "
+            + ", ".join(
+                f"{channel}={name}"
+                for channel, name in sorted(rail_names.items())
+            )
+        )
 
     # tegrastats 실행 (sudo 필요할 수 있음)
     try:
@@ -113,6 +183,7 @@ def main():
     def handle_sigint(sig, frame):
         stopping["flag"] = True
     signal.signal(signal.SIGINT, handle_sigint)
+    signal.signal(signal.SIGTERM, handle_sigint)
 
     with open(args.out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -125,6 +196,7 @@ def main():
                 if args.duration and elapsed > args.duration:
                     break
                 parsed = parse_line(line)
+                parsed.update(read_ina3221(ina_device, rail_names))
                 parsed["elapsed_s"] = round(elapsed, 1)
                 writer.writerow(parsed)
                 f.flush()
@@ -144,11 +216,17 @@ def main():
     print(f"\n수집 완료: {count}개 샘플 -> {args.out}")
 
     # 요약
-    _summarize(args.out)
+    summary_out = args.summary_out
+    if summary_out is None:
+        output_path = Path(args.out)
+        summary_out = str(
+            output_path.with_name(f"{output_path.stem}_summary.csv")
+        )
+    _summarize(args.out, summary_out)
     return 0
 
 
-def _summarize(path):
+def _summarize(path, summary_out):
     with open(path) as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -175,11 +253,46 @@ def _summarize(path):
     print(stat("cpu_pct_avg", "%"))
     print(stat("gr3d_pct", "%"))
     print(stat("ram_used_mb", "MB"))
+    print(stat("temp_cpu_c", "C"))
+    print(stat("temp_gpu_c", "C"))
+    print(stat("power_total_mw", "mW"))
+    print(stat("power_gpu_mw", "mW"))
+    print(stat("power_cpu_mw", "mW"))
     gpu_vals = col("gr3d_pct")
     if gpu_vals:
         gpu_active = sum(1 for v in gpu_vals if v > 0) / len(gpu_vals) * 100
         print(f"  GPU 사용된 샘플 비율: {gpu_active:.0f}% "
               f"({'GPU 활용중' if gpu_active > 10 else 'GPU 거의 미사용=CPU로 추론'})")
+
+    summary = {
+        "samples": len(rows),
+        "duration_s": col("elapsed_s")[-1] if col("elapsed_s") else 0.0,
+    }
+    for name in (
+        "cpu_pct_avg",
+        "gr3d_pct",
+        "ram_used_mb",
+        "temp_cpu_c",
+        "temp_gpu_c",
+        "power_total_mw",
+        "power_gpu_mw",
+        "power_cpu_mw",
+    ):
+        vals = col(name)
+        summary[f"{name}_mean"] = (
+            round(sum(vals) / len(vals), 3) if vals else ""
+        )
+        summary[f"{name}_min"] = round(min(vals), 3) if vals else ""
+        summary[f"{name}_max"] = round(max(vals), 3) if vals else ""
+    summary["gpu_active_sample_pct"] = (
+        round(sum(1 for value in gpu_vals if value > 0) / len(gpu_vals) * 100, 3)
+        if gpu_vals else ""
+    )
+    with open(summary_out, "w", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=list(summary))
+        writer.writeheader()
+        writer.writerow(summary)
+    print(f"  요약 CSV: {summary_out}")
 
 
 if __name__ == "__main__":
